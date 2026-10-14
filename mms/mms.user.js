@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.5
+// @version      0.1.6
 // @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
 // @match        https://*/
 // @match        http://*/
@@ -20,11 +20,11 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.5';
+  const VERSION = '0.1.6';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
-  const OFFICE_DEFAULTS = ['文書處理', '資安文書處理', '請假'];
+  const OFFICE_DEFAULTS = ['文書處理', '資安文書處理'];
   const DRAFT_KEY = 'moonbase.mms.worklog.draft.v1';
   const MAX_AGE = 10 * 60 * 1000;
   const invariant = (ok, message) => { if (!ok) throw new Error(message); };
@@ -205,7 +205,7 @@
     invariant(typeof value.memory === 'boolean' && Number.isInteger(value.total) && value.total >= 2 && value.total <= 24, '本機參數無效。');
     invariant(value.people.every(name => typeof name === 'string' && name.trim() && name.length <= 80) && new Set(value.people.map(clean)).size === value.people.length, '人員設定有空白或重複姓名。');
     const mode = value.mode ?? 'field';
-    invariant(['field', 'office', 'afternoon', 'holiday'].includes(mode), '本機填寫類型無效。');
+    invariant(['field', 'office', 'afternoon', 'holiday', 'leave'].includes(mode), '本機填寫類型無效。');
     const leaveHours = Number(value.leaveHours ?? 4), holidayHours = Number(value.holidayHours ?? 8), overtimeHours = Number(value.overtimeHours ?? 0);
     invariant(Number.isInteger(leaveHours) && leaveHours >= 1 && leaveHours <= 7, '下午請假時數須為 1～7 小時。');
     invariant(Number.isInteger(holidayHours) && holidayHours >= 8 && holidayHours <= 12, '假日加班時數須為 8～12 小時。');
@@ -232,9 +232,9 @@
 
   function officeSettings(value = { schema: 1, favorites: OFFICE_DEFAULTS, last: OFFICE_DEFAULTS[0] }) {
     invariant(value?.schema === 1 && Array.isArray(value.favorites), '非現場常用項目設定格式錯誤。');
-    const favorites = [...new Set([...OFFICE_DEFAULTS, ...value.favorites].map(clean))];
+    const favorites = [...new Set([...OFFICE_DEFAULTS, ...value.favorites].map(clean))].filter(text => !['請假', '整天請假'].includes(text));
     invariant(favorites.every(text => text && text.length <= 200 && !/[\r\n]/.test(text)), '常用項目請填入 1～200 字的單行文字。');
-    const last = clean(value.last);
+    const last = ['請假', '整天請假'].includes(clean(value.last)) ? OFFICE_DEFAULTS[0] : clean(value.last);
     invariant(last && last.length <= 200 && !/[\r\n]/.test(last), '上次非現場項目請填入 1～200 字的單行文字。');
     return { schema: 1, favorites, last };
   }
@@ -264,7 +264,7 @@
   function weekday(date) { const day = new Date(`${dateKey(date)}T00:00:00Z`).getUTCDay(); return day > 0 && day < 6; }
   function workload(value, date, requested) {
     const config = settings(value);
-    const fullLeave = config.mode === 'office' && requested[0] === '請假';
+    const fullLeave = config.mode === 'leave';
     const overtime = weekday(date) && ['field', 'office'].includes(config.mode) && !fullLeave ? config.overtimeHours : 0;
     const base = config.mode === 'afternoon' ? 8 - config.leaveHours : config.mode === 'holiday' ? config.holidayHours : 8;
     const total = fullLeave ? 0 : base + overtime;
@@ -272,6 +272,7 @@
   }
   function makeWorkPlan(existing, requested, options, scope) {
     const { base, overtime, total, fullLeave, mode } = options;
+    if (fullLeave) requested = ['請假'];
     const valid = existing.map(row => Number(row.seq));
     const assigned = scope.selected.map(name => {
       const people = scope.employees.filter(person => person.name === name);
@@ -350,9 +351,17 @@
     sessionStorage.setItem(OWNER_KEY, owner);
     const raw = localStorage.getItem(SETTINGS_KEY);
     const officeRaw = localStorage.getItem(OFFICE_KEY);
-    if (officeRaw) office = officeSettings(JSON.parse(officeRaw));
+    const officeValue = officeRaw ? JSON.parse(officeRaw) : null;
+    if (officeValue) {
+      office = officeSettings(officeValue);
+      if (JSON.stringify(office) !== officeRaw) {
+        localStorage.setItem(OFFICE_KEY, JSON.stringify(office));
+        invariant(localStorage.getItem(OFFICE_KEY) === JSON.stringify(office), '常用項目更新保存失敗。');
+      }
+    }
     if (raw) {
-      const saved = settings(JSON.parse(raw));
+      let saved = settings(JSON.parse(raw));
+      if (saved.mode === 'office' && ['請假', '整天請假'].includes(clean(officeValue?.last))) saved = settings({ ...saved, mode: 'leave' });
       configuration = saved;
       if (JSON.stringify(saved) !== raw) configuration = saveSettings(localStorage, saved);
     }
@@ -373,11 +382,11 @@
   </style><details class="panel" open><summary>📝 MMS工作日誌小助手 v${VERSION}</summary><div class="body">
     <label>工作日期<input id="date" type="date"></label>
     <section id="personArea"><strong>填寫人員</strong> <button id="readPeople" class="secondary" type="button">讀取人員</button><div id="people"></div></section>
-    <label>填寫類型<select id="mode"><option value="field">現場單位（LINE 工項＋TBM-KY）</option><option value="office">非現場單位</option><option value="afternoon">非現場單位（下午請假）</option><option value="holiday">假日加班</option></select></label>
-    <label id="leaveArea" hidden>下午請假時數<input id="leaveHours" type="number" min="1" max="7" step="1"></label>
+    <label>填寫類型<select id="mode"><option value="field">灰系統專用</option><option value="office">通用</option><option value="afternoon">通用（下午請假）</option><option value="leave">整天請假</option><option value="holiday">假日加班</option></select></label>
+    <label id="leaveArea" hidden>下午請假時數<select id="leaveHours">${Array.from({ length: 7 }, (_, i) => `<option value="${i + 1}">${i + 1} 小時</option>`).join('')}</select></label>
     <label id="fieldArea">貼上 LINE 工項<textarea id="raw" placeholder="直接貼整段 LINE 訊息"></textarea></label>
-    <div id="officeArea" hidden><label>選常用項目<select id="officeItem"></select></label><label>本次工作項目<input id="officeText" type="text" maxlength="200" placeholder="手動輸入特殊工作，或從上方選常用項目"></label><button id="addFavorite" class="secondary" type="button">加入常用項目</button><p class="hint">手輸不加入常用。全天請假選「請假」；下午請假填上午的工作內容。</p></div>
-    <div id="holidayArea" hidden><label>加班時數<input id="holidayHours" type="number" min="8" max="12" step="1"></label><label>工作內容與經過<textarea id="holidayText" maxlength="2000" placeholder="輸入本次假日加班工作內容"></textarea></label></div>
+    <div id="officeArea" hidden><label>選常用項目<select id="officeItem"></select></label><label>本次工作項目<input id="officeText" type="text" maxlength="200" placeholder="手動輸入特殊工作，或從上方選常用項目"></label><button id="addFavorite" class="secondary" type="button">加入常用項目</button><p class="hint">手輸不加入常用；下午請假填上午的工作內容。</p></div>
+    <div id="holidayArea" hidden><label>加班時數<select id="holidayHours">${Array.from({ length: 5 }, (_, i) => `<option value="${i + 8}">${i + 8} 小時</option>`).join('')}</select></label><label>工作內容與經過<textarea id="holidayText" maxlength="2000" placeholder="輸入本次假日加班工作內容"></textarea></label></div>
     <section id="overtimeArea"><label><input id="overtimeEnabled" type="checkbox"> 平日加班</label><div id="overtimeFields" hidden><label>加班時數<select id="overtimeHours"><option value="2">2 小時</option><option value="3">3 小時</option><option value="4">4 小時</option></select></label><label>加班工作內容<textarea id="overtimeText" maxlength="2000"></textarea></label></div></section>
     <button id="fill" type="button">填寫</button>
     <p id="status"></p>
@@ -408,7 +417,7 @@
     const mode = $('mode').value, officeMode = ['office', 'afternoon'].includes(mode);
     $('officeArea').hidden = !officeMode; $('fieldArea').hidden = mode !== 'field';
     $('leaveArea').hidden = mode !== 'afternoon'; $('holidayArea').hidden = mode !== 'holiday';
-    $('overtimeArea').hidden = !['field', 'office'].includes(mode) || !weekday($('date').value) || (mode === 'office' && clean($('officeText').value) === '請假');
+    $('overtimeArea').hidden = !['field', 'office'].includes(mode) || !clean($('date').value) || !weekday($('date').value);
     $('overtimeFields').hidden = !$('overtimeEnabled').checked;
   }
   displayOffice();
@@ -416,7 +425,7 @@
   $('mode').onchange = () => { displayMode(); rememberPeople(); };
   $('officeItem').onchange = () => { if ($('officeItem').value) $('officeText').value = $('officeItem').value; displayMode(); };
   $('officeText').oninput = () => { const text = clean($('officeText').value); $('officeItem').value = office.favorites.includes(text) ? text : ''; displayMode(); };
-  function officeInput() { const text = clean($('officeText').value); invariant(text && text.length <= 200 && !/[\r\n]/.test(text), '請輸入本次工作項目，或選擇常用項目（1～200 字）。'); return text; }
+  function officeInput() { const text = clean($('officeText').value); invariant(text && text.length <= 200 && !/[\r\n]/.test(text), '請輸入本次工作項目，或選擇常用項目（1～200 字）。'); invariant(!['請假', '整天請假'].includes(text), '請改選填寫類型「整天請假」。'); return text; }
   $('addFavorite').onclick = () => {
     try { const name = officeInput(); const value = officeSettings({ schema: 1, favorites: [...office.favorites, name], last: name }); localStorage.setItem(OFFICE_KEY, JSON.stringify(value)); invariant(localStorage.getItem(OFFICE_KEY) === JSON.stringify(value), '常用項目保存失敗。'); office = value; displayOffice(name); status('已加入常用項目。'); } catch (error) { status(error.message, true); }
   };
@@ -754,7 +763,7 @@
     const destination = await findWorkDate(draft.date, draft.dept); move(draft, destination);
   }
   $('fill').onclick = () => action(async () => {
-    const params = parameters(), requested = ['office', 'afternoon'].includes(params.mode) ? [officeInput()] : params.mode === 'holiday' ? [clean($('holidayText').value)] : parseLine($('raw').value);
+    const params = parameters(), requested = params.mode === 'leave' ? ['請假'] : ['office', 'afternoon'].includes(params.mode) ? [officeInput()] : params.mode === 'holiday' ? [clean($('holidayText').value)] : parseLine($('raw').value);
     if (params.mode === 'holiday') invariant(requested[0], '請填入假日加班的工作內容與經過。');
     const draft = { ...params, requested, hours: null, explicitDate: params.date !== today(), created: Date.now() };
     await proceed(draft);
