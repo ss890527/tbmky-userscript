@@ -1,3 +1,16 @@
+# 林口電廠電腦文書
+
+集中管理日常文書自動化工具。目前包含 TBM-KY 上傳與 MMS 工作日誌，後續可擴充其他表單工具。
+
+| 工具 | 用途 | 安裝入口 |
+|---|---|---|
+| MMS工作日誌小助手 | 現場、非現場、請假填單 | [安裝／更新](https://raw.githubusercontent.com/ss890527/tbmky-userscript/main/mms/mms.user.js) |
+| TBM-KY 上傳小助手 | 準備上傳表單與常用包設定 | [安裝／更新](https://raw.githubusercontent.com/ss890527/tbmky-userscript/main/tbmky.user.js) |
+
+[MMS 使用說明](mms/README.md)。工具設定保存在各台瀏覽器的對應網站，公開倉庫只保存通用程式與說明。
+
+---
+
 # TBM-KY 上傳小助手
 
 [安裝／更新腳本](https://raw.githubusercontent.com/ss890527/tbmky-userscript/main/tbmky.user.js)
