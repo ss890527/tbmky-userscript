@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.8
+// @version      0.1.9
 // @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.8';
+  const VERSION = '0.1.9';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -48,7 +48,7 @@
   }
 
   function stripChat(line) {
-    const text = line.trim().replace(/\\$/, '').trim();
+    const text = line.trim().replace(/\\+$/, '').trim();
     const chat = /^\d{1,2}:\d{2}\s+\S+\s+(.*)$/.exec(text);
     return chat ? chat[1] : text;
   }
@@ -56,31 +56,40 @@
   function parseLine(raw) {
     invariant(typeof raw === 'string' && raw.trim(), '請先貼上 LINE 工作訊息。');
     const jobs = [];
-    let current = null;
+    let current = null, pending = null;
     const flush = () => {
       if (!current) return;
       invariant(current.unit && current.started && current.lines.some(x => x.trim()), '某份請修缺少機組別或請修內容，請補齊。');
       jobs.push(`機組別：${current.unit}\n請修內容：${current.lines.join('\n').trim()}`);
-      current = null;
+      current = null; pending = null;
     };
     for (const original of raw.replace(/\r\n?/g, '\n').split('\n')) {
       const line = stripChat(original);
-      if (/^請修日期\s*[:：]/.test(line)) { flush(); continue; }
-      const unit = /^機組別\s*[:：]\s*(.*)$/.exec(line);
-      if (unit) { flush(); current = { unit: unit[1].trim(), started: false, lines: [] }; continue; }
-      const body = /^請修內容\s*[:：]\s*(.*)$/.exec(line);
-      if (body) {
-        invariant(current && !current.started, '請修內容缺少對應機組別，請核對原文。');
-        current.started = true;
-        if (body[1]) current.lines.push(body[1]);
+      const field = /^(機\s*組\s*別\s*[／/]\s*區\s*域\s*別|機\s*組(?:\s*[／/]\s*區\s*域)?\s*別|區\s*域\s*別|請\s*修\s*日\s*期|請\s*修\s*內\s*容)(?:(?:\s*[:：]\s*|\s+)(.*)|\s*)$/.exec(line);
+      if (field) {
+        const label = field[1].replace(/\s/g, ''), value = clean(field[2]);
+        if (label === '請修日期') {
+          // 日期可在機組之前或之後；內容尚未開始時不切斷同一份請修。
+          if (current?.started) flush();
+          pending = value ? null : 'date';
+        } else if (label === '請修內容') {
+          invariant(current && !current.started, '請修內容缺少對應機組別或機組/區域別，請核對原文。');
+          current.started = true; pending = null;
+          if (value) current.lines.push(value);
+        } else {
+          flush(); current = { unit: value, started: false, lines: [] };
+          pending = value ? null : 'unit';
+        }
         continue;
       }
       if (!line || /^\d+\s*[.．、]$/.test(line)) continue;
       if (/今日值班|^\S*值\s+[A-Z]班|^共用設備\s*[:：]/.test(line)) continue;
+      if (pending === 'date') { pending = null; continue; }
+      if (pending === 'unit') { current.unit = line; pending = null; continue; }
       if (current?.started) current.lines.push(line);
     }
     flush();
-    invariant(jobs.length, '未找到「機組別＋請修內容」，請核對貼上的訊息。');
+    invariant(jobs.length, '未找到機組／區域與請修內容，請保留這兩個標題及內容。');
     return jobs;
   }
 
@@ -212,11 +221,15 @@
     invariant(Number.isInteger(morningLeaveHours) && morningLeaveHours >= 1 && morningLeaveHours <= 4, '上午請假時數須為 1～4 小時。');
     invariant(Number.isInteger(holidayHours) && holidayHours >= 8 && holidayHours <= 12, '假日加班時數須為 8～12 小時。');
     invariant([0, 2, 3, 4].includes(overtimeHours), '平日加班請選 2、3 或 4 小時。');
-    const overtimeText = clean(value.overtimeText ?? '大修工作'), holidayText = clean(value.holidayText ?? '');
+    const overtimeTexts = { field: '大修工作', office: '', morning: '', ...value.overtimeTexts };
+    const legacyDefault = !value.overtimeTexts && mode !== 'field' && value.overtimeText === '大修工作';
+    const overtimeText = clean(legacyDefault ? '' : value.overtimeText ?? overtimeTexts[mode] ?? '');
+    if (['field', 'office', 'morning'].includes(mode)) overtimeTexts[mode] = overtimeText;
+    const holidayText = clean(value.holidayText ?? '');
     const lastOvertimeText = clean(value.lastOvertimeText ?? '大修工作');
-    invariant(overtimeText && overtimeText.length <= 2000 && holidayText.length <= 2000 && lastOvertimeText && lastOvertimeText.length <= 2000, '加班內容請填入 1～2000 字。');
+    invariant(Object.values(overtimeTexts).every(text => typeof text === 'string' && text.length <= 2000) && overtimeText.length <= 2000 && holidayText.length <= 2000 && lastOvertimeText && lastOvertimeText.length <= 2000, '加班內容最多 2000 字。');
     // memory 僅保留作舊設定兼容；目前一律自動保存與載入。
-    return { schema: 1, memory: true, total: 8, people: value.people.map(clean), mode, leaveHours, morningLeaveHours, holidayHours, overtimeHours, overtimeText, holidayText, lastOvertimeText };
+    return { schema: 1, memory: true, total: 8, people: value.people.map(clean), mode, leaveHours, morningLeaveHours, holidayHours, overtimeHours, overtimeText, overtimeTexts, holidayText, lastOvertimeText };
   }
 
   function saveSettings(storage, value) {
@@ -267,10 +280,11 @@
   function workload(value, date, requested) {
     const config = settings(value);
     const fullLeave = config.mode === 'leave';
-    const overtime = weekday(date) && ['field', 'office'].includes(config.mode) && !fullLeave ? config.overtimeHours : 0;
+    const overtime = weekday(date) && ['field', 'office', 'morning'].includes(config.mode) && !fullLeave ? config.overtimeHours : 0;
+    invariant(!overtime || config.overtimeText, '請輸入加班工作內容。');
     const base = config.mode === 'afternoon' ? 8 - config.leaveHours : config.mode === 'morning' ? 8 - config.morningLeaveHours : config.mode === 'holiday' ? config.holidayHours : 8;
     const total = fullLeave ? 0 : base + overtime;
-    const period = config.mode === 'morning' ? `${config.morningLeaveHours === 4 ? '1230' : String(8 + config.morningLeaveHours).padStart(2, '0') + '00'}-1630` : dutyPeriod(total);
+    const period = config.mode === 'morning' ? `${config.morningLeaveHours === 4 ? '1230' : String(8 + config.morningLeaveHours).padStart(2, '0') + '00'}-${overtime ? dutyPeriod(8 + overtime).split('-')[1] : '1630'}` : dutyPeriod(total);
     return { ...config, base, overtime, total, period, fullLeave, date: dateKey(date) };
   }
   function makeWorkPlan(existing, requested, options, scope) {
@@ -290,8 +304,9 @@
     // 用本人指派、已填工時差及上次加班內容辨識，不能假設加班永遠是最後一列。
     const previousOvertime = new Set();
     for (const person of assigned) {
-      if (!['field', 'office'].includes(mode) || person.previousHours <= 8 || person.previousHours > 12) continue;
-      const matches = existing.filter(row => person.sequences.includes(Number(row.seq)) && !isTbm(row.context) && Number(row.hour) === person.previousHours - 8 && [options.lastOvertimeText, options.overtimeText].some(text => canonical(row.context) === canonical(text)));
+      if (!['field', 'office', 'morning'].includes(mode) || person.previousHours > 12) continue;
+      if (mode === 'morning' ? person.sequences.length < 2 : person.previousHours <= 8) continue;
+      const matches = existing.filter(row => person.sequences.includes(Number(row.seq)) && !isTbm(row.context) && (mode === 'morning' ? [2, 3, 4].includes(Number(row.hour)) : Number(row.hour) === person.previousHours - 8) && [options.lastOvertimeText, options.overtimeText].some(text => text && canonical(row.context) === canonical(text)));
       invariant(matches.length <= 1, '本人加班工項無法唯一辨識，請先在網站核對。');
       if (matches.length) previousOvertime.add(Number(matches[0].seq));
     }
@@ -427,12 +442,12 @@
     $('leaveArea').hidden = mode !== 'afternoon'; $('holidayArea').hidden = mode !== 'holiday';
     $('morningLeaveArea').hidden = mode !== 'morning';
     $('manualArea').hidden = Boolean($('officeItem').value);
-    $('overtimeArea').hidden = !['field', 'office'].includes(mode) || !clean($('date').value) || !weekday($('date').value);
+    $('overtimeArea').hidden = !['field', 'office', 'morning'].includes(mode) || !clean($('date').value) || !weekday($('date').value);
     $('overtimeFields').hidden = !$('overtimeEnabled').checked;
   }
   displayOffice();
   displayMode();
-  $('mode').onchange = () => { displayMode(); rememberPeople(); };
+  $('mode').onchange = () => { $('overtimeText').value = configuration.overtimeTexts[$('mode').value] ?? ''; displayMode(); rememberPeople(); };
   $('officeItem').onchange = () => { if ($('officeItem').value) $('officeText').value = $('officeItem').value; displayMode(); };
   function officeInput() { const text = clean($('officeItem').value || $('officeText').value); invariant(text && text.length <= 200 && !/[\r\n]/.test(text), '請輸入本次工作項目，或選擇常用項目（1～200 字）。'); invariant(!['請假', '整天請假'].includes(text), '請改選填寫類型「整天請假」。'); return text; }
   $('addFavorite').onclick = () => {
@@ -613,7 +628,7 @@
   displayPeople();
   function selectedPeople() { return [...$('people').querySelectorAll('input:checked')].map(box => box.value); }
   function currentSettings() {
-    return settings({ schema: 1, memory: true, total: 8, people: selectedPeople(), mode: $('mode').value, leaveHours: Number($('leaveHours').value), morningLeaveHours: Number($('morningLeaveHours').value), holidayHours: Number($('holidayHours').value), holidayText: $('holidayText').value, overtimeHours: $('overtimeEnabled').checked ? Number($('overtimeHours').value) : 0, overtimeText: $('overtimeText').value, lastOvertimeText: configuration.lastOvertimeText });
+    return settings({ schema: 1, memory: true, total: 8, people: selectedPeople(), mode: $('mode').value, leaveHours: Number($('leaveHours').value), morningLeaveHours: Number($('morningLeaveHours').value), holidayHours: Number($('holidayHours').value), holidayText: $('holidayText').value, overtimeHours: $('overtimeEnabled').checked ? Number($('overtimeHours').value) : 0, overtimeText: $('overtimeText').value, overtimeTexts: configuration.overtimeTexts, lastOvertimeText: configuration.lastOvertimeText });
   }
   function parameters() {
     const value = currentSettings();
@@ -774,6 +789,7 @@
   $('fill').onclick = () => action(async () => {
     const params = parameters(), requested = params.mode === 'leave' ? ['請假'] : ['office', 'afternoon', 'morning'].includes(params.mode) ? [officeInput()] : params.mode === 'holiday' ? [clean($('holidayText').value)] : parseLine($('raw').value);
     if (params.mode === 'holiday') invariant(requested[0], '請填入假日加班的工作內容與經過。');
+    workload(params, params.date, requested);
     const draft = { ...params, requested, hours: null, explicitDate: params.date !== today(), created: Date.now() };
     await proceed(draft);
   });
