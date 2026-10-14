@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.7
+// @version      0.1.8
 // @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.7';
+  const VERSION = '0.1.8';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -388,7 +388,7 @@
   </style><details class="panel" open><summary>📝 MMS工作日誌小助手 v${VERSION}</summary><div class="body">
     <label>工作日期<input id="date" type="date"></label>
     <section id="personArea"><strong>填寫人員</strong> <button id="readPeople" class="secondary" type="button">讀取人員</button><div id="people"></div></section>
-    <label>填寫類型<select id="mode"><option value="field">灰系統專用</option><option value="office">通用</option><option value="afternoon">通用（下午請假）</option><option value="morning">通用（上午請假）</option><option value="leave">整天請假</option><option value="holiday">假日加班</option></select></label>
+    <label>填寫類型<select id="mode"><option value="field">灰系統專用</option><option value="office">通用</option><option value="morning">通用（上午請假）</option><option value="afternoon">通用（下午請假）</option><option value="leave">整天請假</option><option value="holiday">假日加班</option></select></label>
     <label id="leaveArea" hidden>下午請假時數<select id="leaveHours">${Array.from({ length: 4 }, (_, i) => `<option value="${i + 1}">${i + 1} 小時</option>`).join('')}</select></label>
     <label id="morningLeaveArea" hidden>上午請假時數<select id="morningLeaveHours">${Array.from({ length: 4 }, (_, i) => `<option value="${i + 1}">${i + 1} 小時</option>`).join('')}</select></label>
     <label id="fieldArea">貼上 LINE 工項<textarea id="raw" placeholder="直接貼整段 LINE 訊息"></textarea></label>
