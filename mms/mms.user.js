@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.3
+// @version      0.1.4
 // @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.3';
+  const VERSION = '0.1.4';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -96,66 +96,99 @@
     return /^(?:TBM(?:-?KY)?(?:工具箱)?會議|TBM-KY工具箱會議)$/i.test(clean(value).replace(/\s/g, ''));
   }
 
-  function distribute(total, count) {
-    invariant(Number.isInteger(total) && total > 0 && Number.isInteger(count) && count > 0, '目標時數及工項數量須為正整數。');
-    invariant(total >= count, '工項數超過可分配整點時數，請自行調整各項時數。');
-    const base = Math.floor(total / count), extra = total % count;
-    return Array.from({ length: count }, (_, index) => base + (index >= count - extra ? 1 : 0));
+  function distribute(total, count, step = 1) {
+    const units = total / step;
+    invariant(Number.isInteger(units) && total > 0 && Number.isInteger(count) && count > 0 && [1, 0.5].includes(step), '可分配時數須符合整點或半小時單位。');
+    invariant(units >= count, `工項數超過可分配時數，每項至少 ${step} 小時；請在網站調整。`);
+    const base = Math.floor(units / count), extra = units % count;
+    return Array.from({ length: count }, (_, index) => (base + (index >= count - extra ? 1 : 0)) * step);
   }
 
-  function makePlan(existing, requested, total = 8, explicitHours = null) {
-    invariant(Number.isInteger(total) && total >= 2 && total <= 24, '全日目標時數須為 2～24 的整數。');
+  function makePlan(existing, requested, total = 8, explicitHours = null, scope = null) {
+    invariant(Number.isInteger(total) && total >= 2 && total <= 24, '每人目標時數須為 2～24 的整數。');
     invariant(Array.isArray(existing) && Array.isArray(requested), '工項資料格式錯誤。');
-    const rows = existing.map(row => ({ ...row, context: clean(row.context), hour: Number(row.hour), seq: Number(row.seq) }));
+    const rows = existing.map(row => ({ ...row, added: false, context: clean(row.context), hour: Number(row.hour), seq: Number(row.seq) }));
     const usedSeq = new Set();
     for (const row of rows) {
       invariant(row.context && Number.isInteger(row.seq) && row.seq > 0 && row.seq <= 999 && !usedSeq.has(row.seq), '既有工項內容／序號有缺漏或重複，請先核對。');
-      invariant(Number.isFinite(row.hour) && row.hour > 0, `既有第 ${row.seq} 項時數不大於 0，請先處理示範或未完成項目。`);
+      invariant(Number.isFinite(row.hour) && row.hour >= 0, `既有第 ${row.seq} 項時數格式錯誤。`);
       usedSeq.add(row.seq);
     }
-    if (rows.length) {
-      invariant(isTbm(rows[0].context) && rows[0].seq === 1 && rows[0].hour === 1, '既有第 1 項需為 TBM 會議、1 小時；請先核對。');
-      invariant(rows.filter(row => isTbm(row.context)).length === 1, '既有 TBM 項目重複，請先核對。');
+    const selected = scope ? scope.selected : [''];
+    invariant(Array.isArray(selected) && selected.length && new Set(selected).size === selected.length, '請選擇不重複的填寫人員。');
+    const staff = scope ? scope.employees : [{ name: '', csv: rows.map(row => row.seq).join(',') }];
+    const owned = selected.map(name => {
+      const matches = staff.filter(person => person.name === name);
+      invariant(matches.length <= 1, '指定姓名在表單重複，請先核對。');
+      const csv = mergeCsv(matches[0]?.csv || '', [], [...usedSeq]);
+      return { name, sequences: csv ? csv.split(',').map(Number) : [] };
+    });
+    const frozen = new Set();
+    for (const person of staff.filter(person => person.name && !selected.includes(person.name))) {
+      const csv = mergeCsv(person.csv, [], [...usedSeq]);
+      if (csv) csv.split(',').map(Number).forEach(seq => frozen.add(seq));
     }
-    const seen = new Set(rows.map(row => canonical(row.context)));
-    const added = [], skipped = [];
+    const meetings = rows.filter(row => isTbm(row.context));
+    invariant(meetings.length <= 1, '既有 TBM 項目重複，請先核對。');
+    invariant(!meetings.length || meetings[0].hour === 1, '既有 TBM 會議需為 1 小時；請先核對。');
+    let seq = Math.max(0, ...usedSeq), meeting = meetings[0];
+    if (!meeting) {
+      meeting = { context: TBM, seq: ++seq, hour: 1, progress: 100, added: true };
+      rows.push(meeting);
+    }
+    // 只沿用所有所選人員都已指派的相同工項，避免承接別人的同名工作。
+    const common = rows.filter(row => owned.every(person => person.sequences.includes(row.seq)));
+    const seen = new Map(common.map(row => [canonical(row.context), row]));
+    const skipped = [];
+    const requestedRows = [];
+    const hours = explicitHours ? explicitHours.map(Number) : null;
+    if (hours) invariant(hours.length === requested.length && hours.every(h => Number.isFinite(h) && h > 0), '指定工項時數需全部填入正數。');
     requested.forEach((context, index) => {
       const text = clean(context), key = canonical(text);
       invariant(text && !isTbm(text), '請只提供一般工項，TBM 會議由助手處理。');
-      if (seen.has(key)) skipped.push(index + 1);
-      else { seen.add(key); added.push({ context: text, source: index }); }
+      let row = seen.get(key);
+      if (row) skipped.push(index + 1);
+      else {
+        row = { context: text, source: index, seq: ++seq, hour: 0, progress: 100, added: true };
+        seen.set(key, row); rows.push(row);
+      }
+      requestedRows.push(row);
+    });
+    const assignments = [...new Set([meeting.seq, ...requestedRows.map(row => row.seq)])];
+    const proposals = new Map();
+    const personAssignments = owned.map(person => {
+      const sequences = [...new Set([...person.sequences, ...assignments])].sort((a, b) => a - b);
+      const ownRows = rows.filter(row => sequences.includes(row.seq));
+      for (const row of ownRows) invariant(row.added || row.hour > 0, `既有第 ${row.seq} 項時數不大於 0，請先處理示範或未完成項目。`);
+      const values = new Map(ownRows.map(row => [row.seq, row.hour]));
+      if (hours) {
+        requestedRows.forEach((row, index) => values.set(row.seq, hours[index]));
+      } else if (ownRows.some(row => row.added) || Math.abs(ownRows.reduce((sum, row) => sum + row.hour, 0) - total) > 1e-9) {
+        const adjustable = ownRows.filter(row => row.seq !== meeting.seq && !frozen.has(row.seq));
+        const fixed = ownRows.filter(row => !adjustable.includes(row)).reduce((sum, row) => sum + row.hour, 0);
+        const step = ownRows.length > 8 ? 0.5 : 1;
+        invariant(adjustable.length, '既有工項均與其他人共用，請在網站調整時數。');
+        const chosen = distribute(total - fixed, adjustable.length, step);
+        adjustable.forEach((row, index) => values.set(row.seq, chosen[index]));
+      }
+      invariant(Math.abs([...values.values()].reduce((sum, hour) => sum + hour, 0) - total) < 1e-9, '本人工項時數合計需等於每人目標。');
+      for (const [itemSeq, hour] of values) {
+        const row = rows.find(item => item.seq === itemSeq);
+        invariant(!frozen.has(itemSeq) || hour === row.hour, '指定時數會改到其他人共用工項，請在網站調整。');
+        invariant(!proposals.has(itemSeq) || proposals.get(itemSeq) === hour, '所選人員原工項不同，共用時數無法一致分配；請分開填寫。');
+        proposals.set(itemSeq, hour);
+      }
+      return { name: person.name, sequences, total };
     });
     const changes = [];
-    const oldSum = rows.reduce((sum, row) => sum + row.hour, 0);
-    invariant(oldSum <= total, '既有工項時數已超過目標，請先核對。');
-    const hours = explicitHours ? requested.map((_, i) => Number(explicitHours[i])) : null;
-    if (hours) invariant(hours.length === requested.length && hours.every(h => Number.isFinite(h) && h > 0), '指定工項時數需全部填入正數。');
-    if (!rows.length) {
-      rows.push({ context: TBM, seq: 1, hour: 1, progress: 100, added: true });
-      const chosen = hours ? added.map(row => hours[row.source]) : distribute(total - 1, added.length);
-      invariant(Math.abs(chosen.reduce((a, b) => a + b, 0) - (total - 1)) < 1e-9, '一般工項時數合計需等於全日目標減 1。');
-      added.forEach((row, i) => rows.push({ ...row, seq: i + 2, hour: chosen[i], progress: 100, added: true }));
-    } else if (added.length) {
-      const remaining = total - oldSum;
-      const chosen = hours ? added.map(row => hours[row.source]) : remaining >= added.length ? distribute(remaining, added.length) : added.map(() => 1);
-      let deficit = oldSum + chosen.reduce((a, b) => a + b, 0) - total;
-      for (let i = rows.length - 1; i > 0 && deficit > 0; i--) {
-        if (rows[i].hour === 2 && deficit >= 1) {
-          changes.push({ seq: rows[i].seq, before: 2, after: 1 });
-          rows[i].hour = 1;
-          deficit -= 1;
-        }
-      }
-      invariant(Math.abs(deficit) < 1e-9, deficit > 0 ? '下方沒有足夠的 2 小時工項可分配給補項，請在網站人工調整時數。' : '補項後未滿全日目標，請在網站人工核對時數。');
-      let seq = Math.max(...rows.map(row => row.seq));
-      added.forEach((row, i) => rows.push({ ...row, seq: ++seq, hour: chosen[i], progress: 100, added: true }));
-    } else {
-      invariant(Math.abs(oldSum - total) < 1e-9, '沒有新工項，且既有總時數不符目標。');
+    for (const row of rows) {
+      if (!proposals.has(row.seq)) continue;
+      const hour = proposals.get(row.seq);
+      if (!row.added && row.hour !== hour) changes.push({ seq: row.seq, before: row.hour, after: hour });
+      row.hour = hour;
     }
     invariant(rows.every(row => row.seq <= 999), '工項序號超過網站上限。');
-    const requestedKeys = new Set(requested.map(canonical));
-    const assignments = rows.filter(row => isTbm(row.context) || requestedKeys.has(canonical(row.context))).map(row => row.seq);
-    return { rows, changes, skipped, total, assignments, validSequences: rows.map(row => row.seq), added: rows.filter(row => row.added) };
+    return { rows, changes, skipped, total: rows.reduce((sum, row) => sum + row.hour, 0), assignments, personAssignments, validSequences: rows.map(row => row.seq), added: rows.filter(row => row.added) };
   }
 
   function mergeCsv(value, additions, valid) {
@@ -491,7 +524,7 @@
     location.assign(target.href);
   }
   function sameItems(before, after) {
-    return before.every((row, i) => after[i] && row.context === after[i].context && Number(row.seq) === Number(after[i].seq) && Number(row.hour) === Number(after[i].hour));
+    return before.length === after.length && before.every((row, i) => after[i] && row.context === after[i].context && Number(row.seq) === Number(after[i].seq) && Number(row.hour) === Number(after[i].hour));
   }
   async function prepareForm(draft) {
     const workDate = document.querySelector('#WORK_DT');
@@ -508,20 +541,23 @@
       invariant(destination === '/MMS310/Create', '該日期剛建立了日誌，請回列表重新操作以免重複。');
     }
     const before = currentItems();
+    const existingStaff = readEmployees();
+    const staffSnapshot = () => readEmployees().map(person => [person.name, person.csv, person.fields.period.value, person.fields.hours.value]);
+    const beforeStaff = JSON.stringify(staffSnapshot());
     invariant(['field', 'office'].includes(draft.mode || 'field'), '填寫類型錯誤。');
     const officeMode = draft.mode === 'office', leave = officeMode && draft.requested[0] === '請假';
-    const plan = officeMode ? makeOfficePlan(before, draft.requested, officeSequences(before, draft.people)) : makePlan(before, draft.requested, draft.total, draft.hours);
+    const plan = officeMode ? makeOfficePlan(before, draft.requested, officeSequences(before, draft.people, existingStaff)) : makePlan(before, draft.requested, draft.total, draft.hours, { selected: draft.people, employees: existingStaff });
+    const assignedTo = name => plan.personAssignments?.find(person => person.name === name)?.sequences || plan.assignments;
     invariant(before.every((row, i) => Number(row.seq) === i + 1), '網站新增會重排序號；目前序號不連續，請先核對。');
     const people = await loadDirectory(draft.dept);
     invariant(draft.people.every(name => people.some(person => person.name === name)), '設定人員已不在目前部門清單，請重新勾選。');
     configuration = saveSettings(localStorage, { schema: 1, memory: true, total: draft.settingsTotal ?? draft.total, people: draft.people, mode: draft.mode || 'field' });
-    const existingStaff = readEmployees();
     for (const name of draft.people) {
       const matches = existingStaff.filter(person => person.name === name);
       invariant(matches.length <= 1, '指定姓名在表單重複，請先核對。');
-      if (matches.length) mergeCsv(matches[0].csv, plan.assignments, plan.validSequences);
+      if (matches.length) mergeCsv(matches[0].csv, assignedTo(name), plan.validSequences);
     }
-    invariant(sameItems(before, currentItems()), '表單在核對期間被修改，請重新整理預覽。');
+    invariant(sameItems(before, currentItems()) && beforeStaff === JSON.stringify(staffSnapshot()), '表單在核對期間被修改，請重新按填寫。');
     // 先備妥所有資料，才開始改動表單；只點已觀察到的網站新增按鈕。
     for (const change of plan.changes) {
       const row = readItems().find(item => Number(item.seq) === change.seq);
@@ -575,7 +611,7 @@
         target = readEmployees().find(person => person.name === name);
       }
       const originalPeriod = target.fields.period.value, originalHours = target.fields.hours.value;
-      nativeValue(target.fields.csv, mergeCsv(target.fields.csv.value, plan.assignments, plan.validSequences));
+      nativeValue(target.fields.csv, mergeCsv(target.fields.csv.value, assignedTo(name), plan.validSequences));
       if (leave) { nativeValue(target.fields.period, 0); nativeValue(target.fields.hours, 0); }
       else invariant(target.fields.period.value === originalPeriod && target.fields.hours.value === originalHours, '系統時間或人員總時數在填寫時改變，請核對。');
     }
@@ -583,12 +619,20 @@
     for (const item of plan.added) invariant(Number(readItems().find(row => Number(row.seq) === item.seq)?.progress) === 100, '新工項進度讀回不為 100%。');
     for (const name of draft.people) {
       const person = readEmployees().find(row => row.name === name);
-      invariant(person && person.fields.csv.value === mergeCsv(person.fields.csv.value, plan.assignments, plan.validSequences), '最後人員指派核對失敗。');
+      invariant(person && person.fields.csv.value === mergeCsv(person.fields.csv.value, assignedTo(name), plan.validSequences), '最後人員指派核對失敗。');
+      if (!officeMode) {
+        const sequences = person.fields.csv.value.split(',').map(Number);
+        const ownTotal = currentItems().filter(row => sequences.includes(Number(row.seq))).reduce((sum, row) => sum + Number(row.hour), 0);
+        invariant(Math.abs(ownTotal - draft.total) < 1e-9, '最後本人工項時數不符目標，請核對。');
+      }
       if (leave) invariant(person.fields.period.value === '0' && person.fields.hours.value === '0', '請假人員時間未正確填為 0。');
+    }
+    for (const original of JSON.parse(beforeStaff).filter(person => person[0] && !draft.people.includes(person[0]))) {
+      invariant(staffSnapshot().some(person => JSON.stringify(person) === JSON.stringify(original)), '其他人員資料在填寫時改變，請核對。');
     }
     if (officeMode) rememberOffice(draft.requested[0]);
     sessionStorage.removeItem(DRAFT_KEY);
-    status(`已填寫並核對 ${draft.date}，${officeMode ? '本次非現場工項' : '全日'} ${draft.total} 小時。請親自核對網站並點「存檔」；助手尚未存檔。`);
+    status(`已填寫並核對 ${draft.date}，${officeMode ? '本次非現場工項' : '每人工項合計'} ${draft.total} 小時。請親自核對網站並點「存檔」；助手尚未存檔。`);
   }
   async function proceed(draft) {
     invariant(Date.now() - draft.created <= MAX_AGE, '跨頁草稿已超過 10 分鐘，請重新整理工項。');
