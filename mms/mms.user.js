@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.9
+// @version      0.1.10
 // @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.9';
+  const VERSION = '0.1.10';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -217,10 +217,12 @@
     invariant(['field', 'office', 'afternoon', 'morning', 'holiday', 'leave'].includes(mode), '本機填寫類型無效。');
     const leaveHours = Number(value.leaveHours ?? 4), holidayHours = Number(value.holidayHours ?? 8), overtimeHours = Number(value.overtimeHours ?? 0);
     const morningLeaveHours = Number(value.morningLeaveHours ?? 4);
+    const lastOvertimeHours = Number(value.lastOvertimeHours ?? (overtimeHours || 2));
     invariant(Number.isInteger(leaveHours) && leaveHours >= 1 && leaveHours <= 4, '下午請假時數須為 1～4 小時。');
     invariant(Number.isInteger(morningLeaveHours) && morningLeaveHours >= 1 && morningLeaveHours <= 4, '上午請假時數須為 1～4 小時。');
     invariant(Number.isInteger(holidayHours) && holidayHours >= 8 && holidayHours <= 12, '假日加班時數須為 8～12 小時。');
     invariant([0, 2, 3, 4].includes(overtimeHours), '平日加班請選 2、3 或 4 小時。');
+    invariant([2, 3, 4].includes(lastOvertimeHours), '平日加班請選 2、3 或 4 小時。');
     const overtimeTexts = { field: '大修工作', office: '', morning: '', ...value.overtimeTexts };
     const legacyDefault = !value.overtimeTexts && mode !== 'field' && value.overtimeText === '大修工作';
     const overtimeText = clean(legacyDefault ? '' : value.overtimeText ?? overtimeTexts[mode] ?? '');
@@ -229,7 +231,7 @@
     const lastOvertimeText = clean(value.lastOvertimeText ?? '大修工作');
     invariant(Object.values(overtimeTexts).every(text => typeof text === 'string' && text.length <= 2000) && overtimeText.length <= 2000 && holidayText.length <= 2000 && lastOvertimeText && lastOvertimeText.length <= 2000, '加班內容最多 2000 字。');
     // memory 僅保留作舊設定兼容；目前一律自動保存與載入。
-    return { schema: 1, memory: true, total: 8, people: value.people.map(clean), mode, leaveHours, morningLeaveHours, holidayHours, overtimeHours, overtimeText, overtimeTexts, holidayText, lastOvertimeText };
+    return { schema: 1, memory: true, total: 8, people: value.people.map(clean), mode, leaveHours, morningLeaveHours, holidayHours, overtimeHours, lastOvertimeHours, overtimeText, overtimeTexts, holidayText, lastOvertimeText };
   }
 
   function saveSettings(storage, value) {
@@ -417,10 +419,11 @@
   const $ = id => ui.getElementById(id);
   $('date').value = today();
   $('mode').value = configuration.mode;
-  function displayParameters(value) {
+  function displayParameters(value, restoreDraft = false) {
     $('leaveHours').value = value.leaveHours; $('morningLeaveHours').value = value.morningLeaveHours; $('holidayHours').value = value.holidayHours;
-    $('holidayText').value = value.holidayText; $('overtimeEnabled').checked = value.overtimeHours > 0;
-    $('overtimeHours').value = value.overtimeHours || 2; $('overtimeText').value = value.overtimeText;
+    // 一般開頁預設不勾；只有當次跨頁草稿還原加班啟用狀態。
+    $('holidayText').value = value.holidayText; $('overtimeEnabled').checked = restoreDraft && value.overtimeHours > 0;
+    $('overtimeHours').value = value.lastOvertimeHours; $('overtimeText').value = value.overtimeText;
   }
   displayParameters(configuration);
   function displayOffice(selected = office.last) {
@@ -628,7 +631,7 @@
   displayPeople();
   function selectedPeople() { return [...$('people').querySelectorAll('input:checked')].map(box => box.value); }
   function currentSettings() {
-    return settings({ schema: 1, memory: true, total: 8, people: selectedPeople(), mode: $('mode').value, leaveHours: Number($('leaveHours').value), morningLeaveHours: Number($('morningLeaveHours').value), holidayHours: Number($('holidayHours').value), holidayText: $('holidayText').value, overtimeHours: $('overtimeEnabled').checked ? Number($('overtimeHours').value) : 0, overtimeText: $('overtimeText').value, overtimeTexts: configuration.overtimeTexts, lastOvertimeText: configuration.lastOvertimeText });
+    return settings({ schema: 1, memory: true, total: 8, people: selectedPeople(), mode: $('mode').value, leaveHours: Number($('leaveHours').value), morningLeaveHours: Number($('morningLeaveHours').value), holidayHours: Number($('holidayHours').value), holidayText: $('holidayText').value, overtimeHours: $('overtimeEnabled').checked ? Number($('overtimeHours').value) : 0, lastOvertimeHours: Number($('overtimeHours').value), overtimeText: $('overtimeText').value, overtimeTexts: configuration.overtimeTexts, lastOvertimeText: configuration.lastOvertimeText });
   }
   function parameters() {
     const value = currentSettings();
@@ -773,7 +776,7 @@
     invariant(Date.now() - draft.created <= MAX_AGE, '跨頁草稿已超過 10 分鐘，請重新整理工項。');
     invariant(draft.explicitDate || draft.date === today(), '已跨台灣午夜，請重新核對工作日期。');
     $('date').value = draft.date; displayPeople(draft.people);
-    displayParameters(settings({ ...configuration, ...draft, total: 8, schema: 1, memory: true }));
+    displayParameters(settings({ ...configuration, ...draft, total: 8, schema: 1, memory: true }), true);
     $('mode').value = draft.mode || 'field'; displayMode();
     if (draft.mode === 'field') $('raw').value = draft.requested.join('\n\n');
     if (['office', 'afternoon', 'morning'].includes(draft.mode)) { displayOffice(draft.requested[0]); displayMode(); }
