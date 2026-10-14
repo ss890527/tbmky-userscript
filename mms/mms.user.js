@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.2
+// @version      0.1.3
 // @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.2';
+  const VERSION = '0.1.3';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -171,7 +171,10 @@
     invariant(value && value.schema === 1 && Array.isArray(value.people), '本機設定格式不符，請重新核對設定。');
     invariant(typeof value.memory === 'boolean' && Number.isInteger(value.total) && value.total >= 2 && value.total <= 24, '本機參數無效。');
     invariant(value.people.every(name => typeof name === 'string' && name.trim() && name.length <= 80) && new Set(value.people.map(clean)).size === value.people.length, '人員設定有空白或重複姓名。');
-    return { schema: 1, memory: value.memory, total: value.total, people: value.people.map(clean) };
+    const mode = value.mode ?? 'field';
+    invariant(['field', 'office'].includes(mode), '本機填寫類型無效。');
+    // memory 僅保留作舊設定兼容；目前一律自動保存與載入。
+    return { schema: 1, memory: true, total: value.total, people: value.people.map(clean), mode };
   }
 
   function saveSettings(storage, value) {
@@ -219,7 +222,7 @@
   if (document.getElementById('moonbase-mms-assistant')) return;
   const LEASE_KEY = 'moonbase.mms.worklog.lease.v1';
   const OWNER_KEY = 'moonbase.mms.worklog.owner.v1';
-  let owner, configuration = { schema: 1, memory: false, total: 8, people: [] };
+  let owner, configuration = { schema: 1, memory: true, total: 8, people: [], mode: 'field' };
   let office = officeSettings();
   let busy = false, directory = [];
   let initError = '';
@@ -231,7 +234,8 @@
     if (officeRaw) office = officeSettings(JSON.parse(officeRaw));
     if (raw) {
       const saved = settings(JSON.parse(raw));
-      if (saved.memory) configuration = saved;
+      configuration = saved;
+      if (JSON.stringify(saved) !== raw) configuration = saveSettings(localStorage, saved);
     }
   } catch (error) { initError = `本機設定或暫存讀取失敗：${error.message}`; }
 
@@ -245,18 +249,17 @@
     summary{cursor:pointer;font-weight:700;padding:10px 12px;background:#eaf3fb}.body{padding:12px}
     label{display:block;margin:9px 0}input,textarea,button,select{font:inherit;box-sizing:border-box}input[type=date],input[type=number],input[type=text],select,textarea{width:100%;padding:6px;border:1px solid #9fb6cb;border-radius:5px;background:white;color:#183047}[hidden]{display:none!important}
     textarea{min-height:120px;resize:vertical}button{padding:7px 10px;margin:3px 3px 3px 0;border:0;border-radius:5px;color:white;background:#155c9e;cursor:pointer}button:disabled{opacity:.45;cursor:default}
-    .secondary{background:#eef5fa;color:#183047}#clear{background:#647483}#fill{width:100%;font-weight:700}#status{white-space:pre-wrap;padding:9px;background:#eef5fa;border-radius:5px;overflow-wrap:anywhere}#status.error{color:#b42318;border:1px solid #e9a2a0;background:#fff0ef;font-weight:700}
+    .secondary{background:#eef5fa;color:#183047}#fill{width:100%;font-weight:700}#status{white-space:pre-wrap;padding:9px;background:#eef5fa;border-radius:5px;overflow-wrap:anywhere}#status.error{color:#b42318;border:1px solid #e9a2a0;background:#fff0ef;font-weight:700}
     .hint{font-size:12px;color:#476078}#people label{display:flex;gap:7px;align-items:center}table{border-collapse:collapse;width:100%;margin:9px 0}td,th{border-bottom:1px solid #d1dce5;padding:5px;text-align:left;vertical-align:top}td.content{white-space:pre-wrap;overflow-wrap:anywhere;max-width:290px}td input{width:64px!important}details.settings{margin:10px 0;border:1px solid #d1dce5;border-radius:5px}
   </style><details class="panel" open><summary>📝 MMS工作日誌小助手 v${VERSION}</summary><div class="body">
     <label>工作日期<input id="date" type="date"></label>
-    <section id="personArea"><strong>填寫人員</strong> <button id="readPeople" class="secondary" type="button">讀取人員</button><div id="people"></div><label><input id="memory" type="checkbox"> 記住所選人員與參數</label></section>
+    <section id="personArea"><strong>填寫人員</strong> <button id="readPeople" class="secondary" type="button">讀取人員</button><div id="people"></div></section>
     <label>填寫類型<select id="mode"><option value="field">現場單位（LINE 工項＋TBM-KY）</option><option value="office">非現場單位（單項 8 小時）</option></select></label>
     <label id="fieldArea">貼上 LINE 工項<textarea id="raw" placeholder="直接貼整段 LINE 訊息"></textarea></label>
     <div id="officeArea" hidden><label>選常用項目<select id="officeItem"></select></label><label>本次工作項目<input id="officeText" type="text" maxlength="200" placeholder="手動輸入特殊工作，或從上方選常用項目"></label><button id="addFavorite" class="secondary" type="button">加入常用項目</button><p class="hint">只填一項 8 小時、100%。手輸不加入常用；請假人員時間填 0。</p></div>
     <button id="fill" type="button">填寫</button>
     <details class="settings"><summary>其他設定</summary><div class="body">
       <label>現場工項目標時數<input id="total" type="number" min="2" max="24" step="1"></label>
-      <button id="clear" type="button">清除記住的人員與參數</button>
       <p class="hint">現場模式 TBM-KY 固定 1 小時，初次時數先 1 後 2。一般工作沿用人員時間；請假填 0。</p>
     </div></details><p id="status"></p>
     <p class="hint">填寫後請核對網站表單，再親自點「存檔」。人員設定存於本機；跨頁草稿最長保留 10 分鐘。</p>
@@ -264,7 +267,7 @@
   const $ = id => ui.getElementById(id);
   $('date').value = today();
   $('total').value = configuration.total;
-  $('memory').checked = configuration.memory;
+  $('mode').value = configuration.mode;
   function displayOffice(selected = office.last) {
     const manual = document.createElement('option'); manual.value = ''; manual.textContent = '手動輸入／選擇常用項目';
     $('officeItem').replaceChildren(manual, ...office.favorites.map(text => { const option = document.createElement('option'); option.value = text; option.textContent = text; return option; }));
@@ -279,7 +282,8 @@
   }
   function displayMode() { const officeMode = $('mode').value === 'office'; $('officeArea').hidden = !officeMode; $('fieldArea').hidden = officeMode; }
   displayOffice();
-  $('mode').onchange = displayMode;
+  displayMode();
+  $('mode').onchange = () => { displayMode(); rememberPeople(); };
   $('officeItem').onchange = () => { if ($('officeItem').value) $('officeText').value = $('officeItem').value; };
   $('officeText').oninput = () => { const text = clean($('officeText').value); $('officeItem').value = office.favorites.includes(text) ? text : ''; };
   function officeInput() { const text = clean($('officeText').value); invariant(text && text.length <= 200 && !/[\r\n]/.test(text), '請輸入本次工作項目，或選擇常用項目（1～200 字）。'); return text; }
@@ -463,16 +467,16 @@
   function parameters() {
     const people = selectedPeople(), total = Number($('total').value);
     invariant(people.length, '請先從網站讀取並勾選填寫人員。');
-    settings({ schema: 1, memory: $('memory').checked, total, people });
-    return { people, total: $('mode').value === 'office' ? 8 : total, settingsTotal: total, memory: $('memory').checked, mode: $('mode').value, date: dateKey($('date').value), dept: department() };
+    settings({ schema: 1, memory: true, total, people, mode: $('mode').value });
+    return { people, total: $('mode').value === 'office' ? 8 : total, settingsTotal: total, mode: $('mode').value, date: dateKey($('date').value), dept: department() };
   }
   function rememberPeople() {
     try {
-      const value = settings({ schema: 1, memory: $('memory').checked, total: Number($('total').value), people: selectedPeople() });
-      const available = directory.length ? directory.map(person => person.name) : configuration.people;
-      invariant(!value.memory || value.people.every(name => available.includes(name)), '請先讀取目前部門人員，再勾選。');
+      const value = settings({ schema: 1, memory: true, total: Number($('total').value), people: selectedPeople(), mode: $('mode').value });
+      const available = directory.length ? directory.map(person => person.name) : [...$('people').querySelectorAll('input')].map(box => box.value);
+      invariant(value.people.every(name => available.includes(name)), '請先讀取目前部門人員，再勾選。');
       configuration = saveSettings(localStorage, value);
-      status(value.memory ? '已記住所選人員與參數。' : '人員記憶已停用；下次請重新勾選。');
+      status('已自動記住上次設定。');
     } catch (error) { status(error.message, true); }
   }
   function persistDraft(draft, expected) {
@@ -510,7 +514,7 @@
     invariant(before.every((row, i) => Number(row.seq) === i + 1), '網站新增會重排序號；目前序號不連續，請先核對。');
     const people = await loadDirectory(draft.dept);
     invariant(draft.people.every(name => people.some(person => person.name === name)), '設定人員已不在目前部門清單，請重新勾選。');
-    configuration = saveSettings(localStorage, { schema: 1, memory: draft.memory ?? configuration.memory, total: draft.settingsTotal ?? draft.total, people: draft.people });
+    configuration = saveSettings(localStorage, { schema: 1, memory: true, total: draft.settingsTotal ?? draft.total, people: draft.people, mode: draft.mode || 'field' });
     const existingStaff = readEmployees();
     for (const name of draft.people) {
       const matches = existingStaff.filter(person => person.name === name);
@@ -589,7 +593,7 @@
   async function proceed(draft) {
     invariant(Date.now() - draft.created <= MAX_AGE, '跨頁草稿已超過 10 分鐘，請重新整理工項。');
     invariant(draft.explicitDate || draft.date === today(), '已跨台灣午夜，請重新核對工作日期。');
-    $('date').value = draft.date; $('total').value = draft.settingsTotal ?? draft.total; $('memory').checked = draft.memory ?? configuration.memory; displayPeople(draft.people);
+    $('date').value = draft.date; $('total').value = draft.settingsTotal ?? draft.total; displayPeople(draft.people);
     $('mode').value = draft.mode || 'field'; displayMode();
     if (draft.mode === 'office') displayOffice(draft.requested[0]);
     if (/\/ViewDetail\//i.test(path)) {
@@ -610,11 +614,7 @@
     const chosen = selectedPeople(); directory = await loadDirectory(department()); displayPeople(chosen);
     status('已讀取目前部門人員，請勾選填寫對象。');
   });
-  $('memory').onchange = rememberPeople;
   $('total').onchange = rememberPeople;
-  $('clear').onclick = () => {
-    try { localStorage.removeItem(SETTINGS_KEY); invariant(localStorage.getItem(SETTINGS_KEY) === null, '清除設定失敗。'); configuration = { schema: 1, memory: false, total: 8, people: [] }; $('memory').checked = false; $('total').value = 8; displayPeople([]); status('已清除記住的人員與參數，網站資料保留。'); } catch (error) { status(error.message, true); }
-  };
   console.info(`[MMS小助手 v${VERSION}] 介面已建立。`);
   status(initError || '先勾選填寫人員，再按「填寫」。首次使用請按「讀取人員」。', Boolean(initError));
   try {
