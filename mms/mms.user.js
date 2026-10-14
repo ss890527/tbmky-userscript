@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.10
+// @version      0.1.11
 // @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.10';
+  const VERSION = '0.1.11';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -289,8 +289,30 @@
     const period = config.mode === 'morning' ? `${config.morningLeaveHours === 4 ? '1230' : String(8 + config.morningLeaveHours).padStart(2, '0') + '00'}-${overtime ? dutyPeriod(8 + overtime).split('-')[1] : '1630'}` : dutyPeriod(total);
     return { ...config, base, overtime, total, period, fullLeave, date: dateKey(date) };
   }
+  function sharedPeople(existing, selected, employees) {
+    const valid = existing.map(row => Number(row.seq));
+    const work = new Set(existing.filter(row => !isTbm(row.context)).map(row => Number(row.seq)));
+    const people = employees.filter(person => person.name).map(person => {
+      const csv = mergeCsv(person.csv, [], valid);
+      return { name: person.name, sequences: csv ? csv.split(',').map(Number).filter(seq => work.has(seq)) : [] };
+    });
+    const group = new Set(selected);
+    // 共用會議固定1小時，不以它把全課連動；一般工項依人員關聯逐層展開。
+    let grew;
+    do {
+      const sequences = new Set(people.filter(person => group.has(person.name)).flatMap(person => person.sequences));
+      grew = false;
+      for (const person of people) if (!group.has(person.name) && person.sequences.some(seq => sequences.has(seq))) {
+        group.add(person.name); grew = true;
+      }
+    } while (grew);
+    return [...group];
+  }
   function makeWorkPlan(existing, requested, options, scope) {
     const { base, overtime, total, fullLeave, mode } = options;
+    const selected = mode === 'field' ? sharedPeople(existing, scope.selected, scope.employees) : [...scope.selected];
+    const linkedPeople = selected.filter(name => !scope.selected.includes(name));
+    scope = { ...scope, selected };
     if (fullLeave) requested = ['請假'];
     const valid = existing.map(row => Number(row.seq));
     const assigned = scope.selected.map(name => {
@@ -352,9 +374,9 @@
       invariant(ownTotal === (fullLeave ? 8 : total), '本人工項合計不符工作時數，請核對。');
       person.total = fullLeave ? 8 : total;
     });
-    return { ...plan, replaceAssignments: true, validSequences: plan.rows.map(row => row.seq), added: plan.rows.filter(row => row.added), total: plan.rows.reduce((sum, row) => sum + row.hour, 0) };
+    return { ...plan, linkedPeople, replaceAssignments: true, validSequences: plan.rows.map(row => row.seq), added: plan.rows.filter(row => row.added), total: plan.rows.reduce((sum, row) => sum + row.hour, 0) };
   }
-  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, MAX_AGE, invariant, clean, dateKey, today, parseLine, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings };
+  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, MAX_AGE, invariant, clean, dateKey, today, parseLine, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   if (typeof document === 'undefined') return;
   const path = location.pathname.replace(/\/$/, '') || '/';
@@ -682,6 +704,13 @@
     const options = workload({ ...configuration, ...draft, total: 8, schema: 1, memory: true }, draft.date, draft.requested);
     const officeMode = ['office', 'afternoon', 'morning'].includes(options.mode);
     const plan = makeWorkPlan(before, draft.requested, options, { selected: draft.people, employees: existingStaff });
+    if (plan.linkedPeople.length) {
+      const names = plan.personAssignments.map(person => person.name);
+      if (!window.confirm(`這些工項與其他人共用，將一起補項及重分配時數。\n本次處理：${names.join('、')}\n包含原本未勾選：${plan.linkedPeople.join('、')}\n工作總時數將一起填為 ${options.total} 小時。\n確認後才修改；最後存檔仍由你操作。`)) {
+        sessionStorage.removeItem(DRAFT_KEY); status('已取消共用人員修正，表單未修改。'); return;
+      }
+    }
+    draft = { ...draft, people: plan.personAssignments.map(person => person.name) };
     const assignedTo = name => plan.personAssignments?.find(person => person.name === name)?.sequences || plan.assignments;
     invariant(before.every((row, i) => Number(row.seq) === i + 1), '網站新增會重排序號；目前序號不連續，請先核對。');
     const people = await loadDirectory(draft.dept);
