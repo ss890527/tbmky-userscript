@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.0
+// @version      0.1.1
 // @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.0';
+  const VERSION = '0.1.1';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -191,8 +191,9 @@
     invariant(value?.schema === 1 && Array.isArray(value.favorites), '非現場常用項目設定格式錯誤。');
     const favorites = [...new Set([...OFFICE_DEFAULTS, ...value.favorites].map(clean))];
     invariant(favorites.every(text => text && text.length <= 200 && !/[\r\n]/.test(text)), '常用項目請填入 1～200 字的單行文字。');
-    invariant(favorites.includes(value.last), '上次非現場項目不在常用清單內。');
-    return { schema: 1, favorites, last: value.last };
+    const last = clean(value.last);
+    invariant(last && last.length <= 200 && !/[\r\n]/.test(last), '上次非現場項目請填入 1～200 字的單行文字。');
+    return { schema: 1, favorites, last };
   }
   function makeOfficePlan(existing, requested) {
     invariant(requested.length === 1 && clean(requested[0]) && !isTbm(requested[0]), '非現場模式只能填一項工作。');
@@ -245,7 +246,7 @@
     <label>工作日期<input id="date" type="date"></label>
     <label>填寫類型<select id="mode"><option value="field">現場單位（LINE 工項＋TBM-KY）</option><option value="office">非現場單位（單項 8 小時）</option></select></label>
     <label id="fieldArea">貼上 LINE 工項<textarea id="raw" placeholder="直接貼整段 LINE 訊息"></textarea></label>
-    <div id="officeArea" hidden><label>非現場常用項目<select id="officeItem"></select></label><label>新增常用項目<input id="officeNew" type="text" maxlength="200" placeholder="輸入常用工作名稱"></label><button id="addFavorite" type="button">加入常用項目</button><p class="hint">只填 1 項、8 小時、100%，不加 TBM-KY。自動記住上次填寫項目；請假的人員工作時間與總時數均為 0。</p></div>
+    <div id="officeArea" hidden><label>選常用項目<select id="officeItem"></select></label><label>本次工作項目<input id="officeText" type="text" maxlength="200" placeholder="手動輸入特殊工作，或從上方選常用項目"></label><button id="addFavorite" type="button">加入常用項目</button><p class="hint">可手輸或選常用項目；只有按「加入常用項目」才加入清單。只填 1 項、8 小時、100%，不加 TBM-KY。記住上次填寫文字；請假的人員時間與總時數均為 0。</p></div>
     <button id="preview" type="button">整理與預覽</button><button id="fill" type="button">核對日期並填寫</button><button id="stop" type="button">停止</button>
     <details class="settings"><summary>人員與參數設定</summary><div class="body">
       <label>全日工項目標時數<input id="total" type="number" min="2" max="24" step="1"></label>
@@ -261,8 +262,10 @@
   $('total').value = configuration.total;
   $('memory').checked = configuration.memory;
   function displayOffice(selected = office.last) {
-    $('officeItem').replaceChildren(...office.favorites.map(text => { const option = document.createElement('option'); option.value = text; option.textContent = text; return option; }));
-    $('officeItem').value = selected;
+    const manual = document.createElement('option'); manual.value = ''; manual.textContent = '手動輸入／選擇常用項目';
+    $('officeItem').replaceChildren(manual, ...office.favorites.map(text => { const option = document.createElement('option'); option.value = text; option.textContent = text; return option; }));
+    $('officeItem').value = office.favorites.includes(selected) ? selected : '';
+    $('officeText').value = selected;
   }
   function rememberOffice(selected) {
     const value = officeSettings({ ...office, last: selected });
@@ -273,9 +276,11 @@
   function displayMode() { const officeMode = $('mode').value === 'office'; $('officeArea').hidden = !officeMode; $('fieldArea').hidden = officeMode; $('plan').replaceChildren(); preview = null; }
   displayOffice();
   $('mode').onchange = displayMode;
-  $('officeItem').onchange = () => { preview = null; $('plan').replaceChildren(); };
+  $('officeItem').onchange = () => { if ($('officeItem').value) $('officeText').value = $('officeItem').value; preview = null; $('plan').replaceChildren(); };
+  $('officeText').oninput = () => { const text = clean($('officeText').value); $('officeItem').value = office.favorites.includes(text) ? text : ''; preview = null; $('plan').replaceChildren(); };
+  function officeInput() { const text = clean($('officeText').value); invariant(text && text.length <= 200 && !/[\r\n]/.test(text), '請輸入本次工作項目，或選擇常用項目（1～200 字）。'); return text; }
   $('addFavorite').onclick = () => {
-    try { const name = clean($('officeNew').value); const value = officeSettings({ schema: 1, favorites: [...office.favorites, name], last: name }); localStorage.setItem(OFFICE_KEY, JSON.stringify(value)); invariant(localStorage.getItem(OFFICE_KEY) === JSON.stringify(value), '常用項目保存失敗。'); office = value; displayOffice(name); $('officeNew').value = ''; preview = null; $('plan').replaceChildren(); status('已加入常用項目。'); } catch (error) { status(error.message, true); }
+    try { const name = officeInput(); const value = officeSettings({ schema: 1, favorites: [...office.favorites, name], last: name }); localStorage.setItem(OFFICE_KEY, JSON.stringify(value)); invariant(localStorage.getItem(OFFICE_KEY) === JSON.stringify(value), '常用項目保存失敗。'); office = value; displayOffice(name); preview = null; $('plan').replaceChildren(); status('已加入常用項目。'); } catch (error) { status(error.message, true); }
   };
   function status(message, error = false) { $('status').textContent = message; $('status').classList.toggle('error', error); }
   function department(doc = document) {
@@ -588,7 +593,7 @@
     invariant(draft.explicitDate || draft.date === today(), '已跨台灣午夜，請重新核對工作日期。');
     $('date').value = draft.date; $('total').value = draft.total; displayPeople(draft.people);
     $('mode').value = draft.mode || 'field'; displayMode();
-    if (draft.mode === 'office') { if (!office.favorites.includes(draft.requested[0])) office.favorites.push(draft.requested[0]); displayOffice(draft.requested[0]); }
+    if (draft.mode === 'office') displayOffice(draft.requested[0]);
     if (/\/ViewDetail\//i.test(path)) {
       const head = document.querySelector('tr.JRHead');
       invariant(head && dateKey(clean(head.cells[2]?.textContent)) === draft.date && clean(head.cells[1]?.textContent) === draft.dept, '檢視頁日期或部門不符。');
@@ -601,13 +606,13 @@
   $('preview').onclick = () => {
     try {
       const officeMode = $('mode').value === 'office';
-      const requested = officeMode ? [$('officeItem').value] : parseLine($('raw').value), total = Number($('total').value);
+      const requested = officeMode ? [officeInput()] : parseLine($('raw').value), total = Number($('total').value);
       drawPreview(officeMode ? makeOfficePlan(currentItems(), requested) : makePlan(currentItems(), requested, total), requested);
       status('整理完成。可修改新增工項時數，核對後按「核對日期並填寫」。');
     } catch (error) { preview = null; status(error.message, true); }
   };
   $('fill').onclick = () => action(async () => {
-    const params = parameters(), requested = params.mode === 'office' ? [$('officeItem').value] : parseLine($('raw').value);
+    const params = parameters(), requested = params.mode === 'office' ? [officeInput()] : parseLine($('raw').value);
     const usePreview = preview?.edited && preview.raw === $('raw').value && preview.date === $('date').value && preview.total === params.total;
     const hours = params.mode === 'field' && usePreview ? preview.hours : null;
     const draft = { ...params, requested, hours, explicitDate: params.date !== today(), created: Date.now() };
