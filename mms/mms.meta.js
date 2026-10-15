@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.15
+// @version      0.1.16
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔。
 // @match        https://*/
 // @match        http://*/
@@ -14,5 +14,5 @@
 // @grant        none
 // @sandbox      raw
 // @noframes
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
