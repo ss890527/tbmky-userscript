@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.12
+// @version      0.1.13
 // @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.12';
+  const VERSION = '0.1.13';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -770,19 +770,24 @@
         invariant(select, '未找到姓名選擇按鈕。'); select.click();
         const frame = await waitFor(() => {
           const element = document.querySelector('iframe[src*="/Home/APIEMP/"]');
-          return element?.contentDocument?.querySelector('#QueryFrm table.table') ? element : null;
+          return element?.contentDocument?.readyState === 'complete' && element.contentDocument.querySelector('#QueryFrm table.table') && typeof element.contentWindow.refPara === 'function' ? element : null;
         }, '組員選擇視窗未就緒。');
         const frameDoc = frame.contentDocument;
         const query = frameDoc.querySelector('#QueryFrm');
         invariant(query?.querySelector('#DEPT_CD') && query.querySelector('[name="keyword"]'), '組員選擇缺少查詢欄位。');
-        nativeValue(query.querySelector('#DEPT_CD'), draft.dept);
-        nativeValue(query.querySelector('#TITLE_CD'), '');
-        nativeValue(query.querySelector('[name="keyword"]'), name);
-        nativeValue(query.querySelector('[name="page"]'), 1);
-        query.querySelector('button[type="submit"]').click();
-        await waitFor(() => frame.contentDocument !== frameDoc && frame.contentDocument?.querySelector('#QueryFrm table.table'), '組員查詢未回傳。');
-        const matches = employeeRecords(frame.contentDocument).filter(person => person.name === name && person.dept === draft.dept);
-        invariant(pageInfo(frame.contentDocument).total === 1 && matches.length === 1, '組員查詢找不到唯一指定姓名，請在選人視窗核對。');
+        let matches = employeeRecords(frameDoc).filter(person => person.name === name && person.dept === draft.dept);
+        invariant(matches.length <= 1, '組員清單有同名且同部門的人員，請在選人視窗核對。');
+        if (!matches.length) {
+          nativeValue(query.querySelector('#DEPT_CD'), draft.dept);
+          nativeValue(query.querySelector('#TITLE_CD'), '');
+          nativeValue(query.querySelector('[name="keyword"]'), name);
+          nativeValue(query.querySelector('[name="page"]'), 1);
+          // 僅提交選人查詢表單；不依賴可能被前端攔截的搜尋按鈕。
+          frame.contentWindow.HTMLFormElement.prototype.submit.call(query);
+          await waitFor(() => frame.contentDocument !== frameDoc && frame.contentDocument?.readyState === 'complete' && frame.contentDocument.querySelector('#QueryFrm table.table') && typeof frame.contentWindow.refPara === 'function', '組員查詢未回傳。');
+          matches = employeeRecords(frame.contentDocument).filter(person => person.name === name && person.dept === draft.dept);
+          invariant(pageInfo(frame.contentDocument).total === 1 && matches.length === 1, '組員查詢找不到唯一指定姓名，請在選人視窗核對。');
+        }
         checkActive(); matches[0].link.click();
         await waitFor(() => readEmployees().some(person => person.name === name), '選人後姓名未回填。');
         target = readEmployees().find(person => person.name === name);
