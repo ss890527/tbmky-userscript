@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.15
+// @version      0.1.16
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔。
 // @match        https://*/
 // @match        http://*/
@@ -14,13 +14,13 @@
 // @grant        none
 // @sandbox      raw
 // @noframes
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 // 正式發布時由準備發布.cjs 加入固定 @updateURL / @downloadURL。
 
 (() => {
   'use strict';
-  const VERSION = '0.1.15';
+  const VERSION = '0.1.16';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -379,6 +379,42 @@
   const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, MAX_AGE, invariant, clean, dateKey, today, parseLine, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   if (typeof document === 'undefined') return;
+  // 成功 alert 可能在回應頁的 inline script 立即執行，須先安裝，再等 DOM 建立介面。
+  const SAVE_RECEIPT_KEY = 'moonbase.mms.worklog.save-receipt.v1';
+  const SAVE_DONE_KEY = 'moonbase.mms.worklog.save-done.v1';
+  const SAVE_RECEIPT_AGE = 120000;
+  let saveSucceeded = false, releaseSaveAlert = () => {};
+  function pendingSave() {
+    try {
+      const pending = JSON.parse(sessionStorage.getItem(SAVE_RECEIPT_KEY));
+      return /^\/MMS310(?:\/|$)/i.test(location.pathname) && pending && Number.isFinite(pending.created) && Date.now() >= pending.created && Date.now() - pending.created <= SAVE_RECEIPT_AGE;
+    } catch { return false; }
+  }
+  function installSaveAlert() {
+    if (!pendingSave()) { try { sessionStorage.removeItem(SAVE_RECEIPT_KEY); } catch {} return; }
+    const original = window.alert;
+    let timer;
+    const restore = () => {
+      clearTimeout(timer);
+      if (window.alert === wrapped) window.alert = original;
+      try { sessionStorage.removeItem(SAVE_RECEIPT_KEY); } catch {}
+    };
+    function wrapped(message, ...args) {
+      if (pendingSave() && /^儲存成功[!！]?$/.test(String(message).replace(/\s/g, ''))) {
+        restore(); saveSucceeded = true;
+        try { sessionStorage.setItem(SAVE_DONE_KEY, String(Date.now())); } catch {}
+        window.dispatchEvent(new Event('moonbase-mms-save-success'));
+        return;
+      }
+      restore();
+      return Reflect.apply(original, window, [message, ...args]);
+    }
+    window.alert = wrapped;
+    timer = setTimeout(restore, SAVE_RECEIPT_AGE);
+    releaseSaveAlert = restore;
+  }
+  installSaveAlert();
+  function start() {
   const path = location.pathname.replace(/\/$/, '') || '/';
   if (!/^\/MMS310(?:\/|$)/i.test(path) && path !== '/M300' && !(path === '/' && document.querySelector('a[href="/M300"]'))) return;
   if (document.getElementById('moonbase-mms-assistant')) return;
@@ -436,7 +472,7 @@
     <section id="overtimeArea"><label><input id="overtimeEnabled" type="checkbox"> 平日加班</label><div id="overtimeFields" hidden><label>加班時數<select id="overtimeHours"><option value="2">2 小時</option><option value="3">3 小時</option><option value="4">4 小時</option></select></label><label>加班工作內容<textarea id="overtimeText" maxlength="2000"></textarea></label></div></section>
     <button id="fill" type="button">填寫</button>
     <p id="status"></p>
-    <p class="hint">填寫核對完成後會自動存檔，成功以網站提示為準。人員設定存於本機；跨頁草稿最長保留 10 分鐘。</p>
+    <p class="hint">填寫核對完成後會自動存檔，收到儲存成功後自動收起助手。人員設定存於本機；跨頁草稿最長保留 10 分鐘。</p>
   </div></details>`;
   const $ = id => ui.getElementById(id);
   $('date').value = today();
@@ -825,6 +861,10 @@
     checkActive();
     sessionStorage.removeItem(DRAFT_KEY);
     status(`已填寫並核對 ${draft.date}，每人 ${options.total} 小時，工作時間 ${options.period}；正在送出存檔，成功請以網站提示為準。`);
+    releaseSaveAlert();
+    sessionStorage.removeItem(SAVE_DONE_KEY);
+    sessionStorage.setItem(SAVE_RECEIPT_KEY, JSON.stringify({ created: Date.now() }));
+    installSaveAlert();
     save.click();
   }
   async function proceed(draft) {
@@ -858,7 +898,20 @@
   $('date').onchange = displayMode;
   for (const id of ['leaveHours', 'morningLeaveHours', 'holidayHours', 'holidayText', 'overtimeEnabled', 'overtimeHours', 'overtimeText']) $(id).onchange = () => { displayMode(); rememberPeople(); };
   console.info(`[MMS小助手 v${VERSION}] 介面已建立。`);
-  status(initError || '先勾選填寫人員，再按「填寫」。首次使用請按「讀取人員」。', Boolean(initError));
+  function finishSave() {
+    status('儲存成功！'); ui.querySelector('details.panel').open = false;
+  }
+  window.addEventListener('moonbase-mms-save-success', finishSave);
+  try {
+    // 成功訊息後網站可能稍晚才導頁；保留本頁剛收到的成功，交下一頁消耗一次。
+    if (!saveSucceeded) {
+      const done = Number(sessionStorage.getItem(SAVE_DONE_KEY));
+      saveSucceeded = done > 0 && Date.now() >= done && Date.now() - done <= SAVE_RECEIPT_AGE;
+      sessionStorage.removeItem(SAVE_DONE_KEY);
+    }
+  } catch {}
+  status(initError || (saveSucceeded ? '儲存成功！' : '先勾選填寫人員，再按「填寫」。首次使用請按「讀取人員」。'), Boolean(initError));
+  if (saveSucceeded && !initError) finishSave();
   try {
     const raw = sessionStorage.getItem(DRAFT_KEY);
     if (raw && !initError) {
@@ -867,4 +920,7 @@
       else status('有未完成草稿，但目前頁面不符預期；請回原分頁或重新按「填寫」。', true);
     }
   } catch (error) { status(`跨頁草稿無法讀取：${error.message}`, true); }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+  else start();
 })();
