@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.11
+// @version      0.1.12
 // @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.11';
+  const VERSION = '0.1.12';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -530,7 +530,9 @@
     invariant(pager, '未找到查詢分頁資訊，不能判定資料完整。');
     const match = /第\s*(\d+)\s*頁\s*\/\s*共\s*(\d+)\s*頁/.exec(pager.parentElement.textContent);
     invariant(match && Number(match[2]) <= 20, '查詢結果頁數無法確認或超過 20 頁，請先核對查詢條件。');
-    return { page: Number(match[1]), total: Number(match[2]) };
+    const page = Number(match[1]), total = Number(match[2]);
+    invariant((page === 0 && total === 0) || (page >= 1 && page <= total), '查詢頁碼與總頁數不一致，停止判讀。');
+    return { page, total };
   }
   function readList(doc) {
     const form = doc.querySelector('#QueryFrm[action="/MMS310"]');
@@ -545,7 +547,10 @@
       if (!view) { invariant(!tr.querySelector('td') || tr.querySelectorAll('td').length === 1, '日誌清單有無法辨識的資料列。'); continue; }
       rows.push({ date: dateKey(clean(tr.cells[dateIndex]?.textContent)), dept: clean(tr.cells[deptIndex]?.textContent).slice(0, 4), href: view.getAttribute('href') });
     }
-    return { rows, create: form.querySelector('a[href="/MMS310/Create"]')?.getAttribute('href'), ...pageInfo(doc) };
+    const pagination = pageInfo(doc);
+    const empty = pagination.page === 0 && pagination.total === 0;
+    if (empty) invariant(rows.length === 0 && !doc.querySelector('.pagination-container a[href], .pagination-container .active'), '零頁分頁仍有資料或分頁連結，停止判讀。');
+    return { rows, create: form.querySelector('a[href="/MMS310/Create"]')?.getAttribute('href'), ...pagination, empty };
   }
   async function findWorkDate(target, dept) {
     const initial = await requestDoc('/MMS310');
@@ -556,6 +561,10 @@
       status(`正在核對 ${target} 的工作日期（第 ${page} 頁）…`);
       const body = new URLSearchParams({ keyword: '', DEPT_CD: dept, sday: target, eday: target, page: String(page) });
       const result = readList(await requestDoc('/MMS310', { method: 'POST', body }));
+      if (result.empty) {
+        invariant(page === 1 && matches.length === 0, '後續分頁意外回傳空清單，停止判讀。');
+        return '/MMS310/Create';
+      }
       invariant(result.page === page, '查詢分頁未前進，停止判讀。');
       pages = result.total;
       invariant(result.rows.every(row => row.date === target && row.dept === dept), '日期或部門篩選未生效，停止以免建立重複日誌。');
