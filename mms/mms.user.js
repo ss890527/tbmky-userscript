@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.13
+// @version      0.1.14
 // @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.13';
+  const VERSION = '0.1.14';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -417,7 +417,7 @@
   document.body.appendChild(host);
   const ui = host.attachShadow({ mode: 'open' });
   ui.innerHTML = `<style>
-    :host{all:initial;position:fixed;right:12px;top:74px;z-index:2147483646;font:14px/1.5 system-ui,sans-serif;color:#183047}
+    :host{all:initial;position:fixed;right:12px;top:74px;z-index:1000;font:14px/1.5 system-ui,sans-serif;color:#183047}
     details.panel{width:min(430px,calc(100vw - 24px));max-height:calc(100vh - 90px);overflow:auto;background:white;border:1px solid #9fb6cb;border-radius:10px;box-shadow:0 5px 25px #0004}
     summary{cursor:pointer;font-weight:700;padding:10px 12px;background:#eaf3fb}.body{padding:12px}
     label{display:block;margin:9px 0}input,textarea,button,select{font:inherit;box-sizing:border-box}input[type=date],input[type=number],input[type=text],select,textarea{width:100%;padding:6px;border:1px solid #9fb6cb;border-radius:5px;background:white;color:#183047}[hidden]{display:none!important}
@@ -767,9 +767,11 @@
           target = readEmployees().at(-1);
         }
         const select = [...target.element.querySelectorAll('span[onclick]')].find(el => /^winSearch\(\d+,'TITLE_DESC'\)$/.test(el.getAttribute('onclick')));
-        invariant(select, '未找到姓名選擇按鈕。'); select.click();
+        invariant(select, '未找到姓名選擇按鈕。');
+        const oldFrames = new Set(document.querySelectorAll('iframe[src*="/Home/APIEMP/"]'));
+        select.click();
         const frame = await waitFor(() => {
-          const element = document.querySelector('iframe[src*="/Home/APIEMP/"]');
+          const element = [...document.querySelectorAll('iframe[src*="/Home/APIEMP/"]')].find(item => !oldFrames.has(item));
           return element?.contentDocument?.readyState === 'complete' && element.contentDocument.querySelector('#QueryFrm table.table') && typeof element.contentWindow.refPara === 'function' ? element : null;
         }, '組員選擇視窗未就緒。');
         const frameDoc = frame.contentDocument;
@@ -789,7 +791,9 @@
           invariant(pageInfo(frame.contentDocument).total === 1 && matches.length === 1, '組員查詢找不到唯一指定姓名，請在選人視窗核對。');
         }
         checkActive(); matches[0].link.click();
-        await waitFor(() => readEmployees().some(person => person.name === name), '選人後姓名未回填。');
+        await waitFor(() => clean(target.fields.name.value) === name, '選人後姓名未回填。');
+        // refPara本來就會關閉自己的layer；等它及關閉動畫完成，才處理下一位。
+        await waitFor(() => !frame.isConnected, '組員已回填，但網站尚未自動關閉選人視窗，已停止。');
         target = readEmployees().find(person => person.name === name);
       }
       nativeValue(target.fields.csv, mergeCsv(plan.replaceAssignments ? '' : target.fields.csv.value, assignedTo(name), plan.validSequences));
