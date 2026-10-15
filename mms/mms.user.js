@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.14
-// @description  整理 LINE 工項、記住填寫人員、核對日期並準備工作日誌；最後存檔由使用者操作。
+// @version      0.1.15
+// @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔。
 // @match        https://*/
 // @match        http://*/
 // @match        https://*/M300*
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.14';
+  const VERSION = '0.1.15';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -436,7 +436,7 @@
     <section id="overtimeArea"><label><input id="overtimeEnabled" type="checkbox"> 平日加班</label><div id="overtimeFields" hidden><label>加班時數<select id="overtimeHours"><option value="2">2 小時</option><option value="3">3 小時</option><option value="4">4 小時</option></select></label><label>加班工作內容<textarea id="overtimeText" maxlength="2000"></textarea></label></div></section>
     <button id="fill" type="button">填寫</button>
     <p id="status"></p>
-    <p class="hint">填寫後請核對網站表單，再親自點「存檔」。人員設定存於本機；跨頁草稿最長保留 10 分鐘。</p>
+    <p class="hint">填寫核對完成後會自動存檔，成功以網站提示為準。人員設定存於本機；跨頁草稿最長保留 10 分鐘。</p>
   </div></details>`;
   const $ = id => ui.getElementById(id);
   $('date').value = today();
@@ -715,7 +715,7 @@
     const plan = makeWorkPlan(before, draft.requested, options, { selected: draft.people, employees: existingStaff });
     if (plan.linkedPeople.length) {
       const names = plan.personAssignments.map(person => person.name);
-      if (!window.confirm(`這些工項與其他人共用，將一起補項及重分配時數。\n本次處理：${names.join('、')}\n包含原本未勾選：${plan.linkedPeople.join('、')}\n工作總時數將一起填為 ${options.total} 小時。\n確認後才修改；最後存檔仍由你操作。`)) {
+      if (!window.confirm(`這些工項與其他人共用，將一起補項及重分配時數。\n本次處理：${names.join('、')}\n包含原本未勾選：${plan.linkedPeople.join('、')}\n工作總時數將一起填為 ${options.total} 小時。\n確認後才修改，核對完成會自動存檔。`)) {
         sessionStorage.removeItem(DRAFT_KEY); status('已取消共用人員修正，表單未修改。'); return;
       }
     }
@@ -816,8 +816,16 @@
     }
     if (officeMode) rememberOffice(draft.requested[0]);
     if (options.overtime) configuration = saveSettings(localStorage, { ...options, total: 8, lastOvertimeText: options.overtimeText });
+    const form = workDate.closest('form');
+    const saves = [...(form?.querySelectorAll('input[type="submit"], button[type="submit"]') || [])].filter(button => clean(button.value || button.textContent) === '存檔');
+    invariant(form && saves.length === 1 && !saves[0].disabled, '找不到唯一可操作的存檔按鈕，已停止送出。');
+    const save = saves[0], destination = new URL(save.getAttribute('formaction') || form.getAttribute('action') || location.href, location.href);
+    invariant(destination.origin === location.origin && destination.pathname === location.pathname && /^\/MMS310\/(?:Create$|Edit\/[^/]+$)/i.test(destination.pathname) && (save.getAttribute('formmethod') || form.method).toLowerCase() === 'post', '存檔表單目的地或方法不符，已停止送出。');
+    invariant(form.reportValidity(), '網站表單仍有未通過驗證的欄位，未送出存檔。');
+    checkActive();
     sessionStorage.removeItem(DRAFT_KEY);
-    status(`已填寫並核對 ${draft.date}，每人 ${options.total} 小時，工作時間 ${options.period}。請親自核對網站並點「存檔」；助手尚未存檔。`);
+    status(`已填寫並核對 ${draft.date}，每人 ${options.total} 小時，工作時間 ${options.period}；正在送出存檔，成功請以網站提示為準。`);
+    save.click();
   }
   async function proceed(draft) {
     invariant(Date.now() - draft.created <= MAX_AGE, '跨頁草稿已超過 10 分鐘，請重新整理工項。');
