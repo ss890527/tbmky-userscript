@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.16
+// @version      0.1.17
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.16';
+  const VERSION = '0.1.17';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -376,7 +376,20 @@
     });
     return { ...plan, linkedPeople, replaceAssignments: true, validSequences: plan.rows.map(row => row.seq), added: plan.rows.filter(row => row.added), total: plan.rows.reduce((sum, row) => sum + row.hour, 0) };
   }
-  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, MAX_AGE, invariant, clean, dateKey, today, parseLine, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings };
+  function createOwner(cryptoApi = globalThis.crypto) {
+    if (typeof cryptoApi?.randomUUID === 'function') {
+      try { return cryptoApi.randomUUID(); } catch { /* 改用較早版本的 API。 */ }
+    }
+    if (typeof cryptoApi?.getRandomValues === 'function') {
+      try {
+        const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
+        return [...bytes].map(value => value.toString(16).padStart(2, '0')).join('');
+      } catch { /* 操作鎖識別可用本機隨機值，不作憑證。 */ }
+    }
+    // 只區分操作鎖所屬分頁，不用於驗證、加密或任何安全憑證。
+    return `local-${Date.now().toString(36)}-${Array.from({ length: 4 }, () => Math.random().toString(36).slice(2)).join('')}`;
+  }
+  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, MAX_AGE, invariant, clean, dateKey, today, parseLine, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings, createOwner };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   if (typeof document === 'undefined') return;
   // 成功 alert 可能在回應頁的 inline script 立即執行，須先安裝，再等 DOM 建立介面。
@@ -425,7 +438,7 @@
   let busy = false, directory = [];
   let initError = '';
   try {
-    owner = sessionStorage.getItem(OWNER_KEY) || crypto.randomUUID();
+    owner = sessionStorage.getItem(OWNER_KEY) || createOwner();
     sessionStorage.setItem(OWNER_KEY, owner);
     const raw = localStorage.getItem(SETTINGS_KEY);
     const officeRaw = localStorage.getItem(OFFICE_KEY);
