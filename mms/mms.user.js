@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.17
+// @version      0.1.18
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.17';
+  const VERSION = '0.1.18';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -57,6 +57,16 @@
     invariant(typeof raw === 'string' && raw.trim(), '請先貼上 LINE 工作訊息。');
     const jobs = [];
     let current = null, pending = null;
+    const readUnit = value => {
+      // 網頁複製可能把兩個欄位擠在同一行；只在尚待機組值時拆第一個內容標題。
+      const inline = /^(.*?)請\s*修\s*內\s*容\s*[:：]\s*(.*)$/.exec(value);
+      current.unit = clean(inline ? inline[1] : value);
+      pending = current.unit ? null : 'unit';
+      if (inline) {
+        current.started = true; pending = null;
+        if (clean(inline[2])) current.lines.push(clean(inline[2]));
+      }
+    };
     const flush = () => {
       if (!current) return;
       invariant(current.unit && current.started && current.lines.some(x => x.trim()), '某份請修缺少機組別或請修內容，請補齊。');
@@ -77,15 +87,15 @@
           current.started = true; pending = null;
           if (value) current.lines.push(value);
         } else {
-          flush(); current = { unit: value, started: false, lines: [] };
-          pending = value ? null : 'unit';
+          flush(); current = { unit: '', started: false, lines: [] };
+          readUnit(value);
         }
         continue;
       }
       if (!line || /^\d+\s*[.．、]$/.test(line)) continue;
       if (/今日值班|^\S*值\s+[A-Z]班|^共用設備\s*[:：]/.test(line)) continue;
       if (pending === 'date') { pending = null; continue; }
-      if (pending === 'unit') { current.unit = line; pending = null; continue; }
+      if (pending === 'unit') { readUnit(line); continue; }
       if (current?.started) current.lines.push(line);
     }
     flush();
