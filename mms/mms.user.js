@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.19
+// @version      0.1.20
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.19';
+  const VERSION = '0.1.20';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -47,10 +47,29 @@
     return ['year', 'month', 'day'].map(type => parts.find(p => p.type === type).value).join('-');
   }
 
-  function stripChat(line) {
-    const text = line.trim().replace(/\\+$/, '').trim();
-    const chat = /^\d{1,2}:\d{2}\s+\S+\s+(.*)$/.exec(text);
-    return chat ? chat[1] : text;
+  const REQUEST_LABEL = '(?:機\\s*組\\s*別\\s*[／/]\\s*區\\s*域\\s*別|機\\s*組(?:\\s*[／/]\\s*區\\s*域)?\\s*別|區\\s*域\\s*別|請\\s*修\\s*日\\s*期|請\\s*修\\s*內\\s*容)';
+  const REQUEST_START = new RegExp('^' + REQUEST_LABEL + '(?=\\s*[:：]|\\s|$)');
+  const CHAT_REQUEST = new RegExp('(?:^|\\s)(' + REQUEST_LABEL + '(?=\\s*[:：]|\\s|$)[\\s\\S]*)$');
+  const REQUEST_FIELD = new RegExp('^(' + REQUEST_LABEL + ')(?:(?:\\s*[:：]\\s*|\\s+)(.*)|\\s*)$');
+  function cleanLineMessages(raw) {
+    invariant(typeof raw === 'string' && raw.trim(), '請先貼上 LINE 工作訊息。');
+    const lines = [];
+    let ignoreMessage = false;
+    for (const original of raw.replace(/\r\n?/g, '\n').split('\n')) {
+      const text = original.trim().replace(/\\+$/, '').trim();
+      if (/^\d{4}[./-]\d{1,2}[./-]\d{1,2}\s*(?:星期|週|周)[一二三四五六日天]$/.test(text)) { ignoreMessage = true; continue; }
+      const chat = /^(?:(?:上午|下午)\s*)?\d{1,2}[:：]\d{2}(?:[:：]\d{2})?\s+([\s\S]*)$/.exec(text);
+      if (chat) {
+        const request = CHAT_REQUEST.exec(chat[1]);
+        ignoreMessage = !request;
+        if (request) lines.push(request[1]);
+        continue;
+      }
+      if (/^(?:.*\s)?已收回訊息[。！!]?\s*$/.test(text)) continue;
+      if (REQUEST_START.test(text)) ignoreMessage = false;
+      if (!ignoreMessage) lines.push(text);
+    }
+    return lines.join('\n').trim();
   }
 
   function parseLine(raw) {
@@ -73,9 +92,8 @@
       jobs.push(`機組別：${current.unit}\n請修內容：${current.lines.join('\n').trim()}`);
       current = null; pending = null;
     };
-    for (const original of raw.replace(/\r\n?/g, '\n').split('\n')) {
-      const line = stripChat(original);
-      const field = /^(機\s*組\s*別\s*[／/]\s*區\s*域\s*別|機\s*組(?:\s*[／/]\s*區\s*域)?\s*別|區\s*域\s*別|請\s*修\s*日\s*期|請\s*修\s*內\s*容)(?:(?:\s*[:：]\s*|\s+)(.*)|\s*)$/.exec(line);
+    for (const line of cleanLineMessages(raw).split('\n')) {
+      const field = REQUEST_FIELD.exec(line);
       if (field) {
         const label = field[1].replace(/\s/g, ''), value = clean(field[2]);
         if (label === '請修日期') {
@@ -399,7 +417,7 @@
     // 只區分操作鎖所屬分頁，不用於驗證、加密或任何安全憑證。
     return `local-${Date.now().toString(36)}-${Array.from({ length: 4 }, () => Math.random().toString(36).slice(2)).join('')}`;
   }
-  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, MAX_AGE, invariant, clean, dateKey, today, parseLine, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings, createOwner };
+  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, MAX_AGE, invariant, clean, dateKey, today, parseLine, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings, createOwner, cleanLineMessages };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   if (typeof document === 'undefined') return;
   // 成功 alert 可能在回應頁的 inline script 立即執行，須先安裝，再等 DOM 建立介面。
