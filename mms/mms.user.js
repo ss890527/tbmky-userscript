@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.20
+// @version      0.1.21
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.20';
+  const VERSION = '0.1.21';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -79,7 +79,9 @@
     const readUnit = value => {
       // 網頁複製可能把兩個欄位擠在同一行；只在尚待機組值時拆第一個內容標題。
       const inline = /^(.*?)請\s*修\s*內\s*容\s*[:：]\s*(.*)$/.exec(value);
-      current.unit = clean(inline ? inline[1] : value);
+      const unit = clean(inline ? inline[1] : value);
+      const unitNumber = /^S00([123])$/i.exec(unit);
+      current.unit = unitNumber ? `${'一二三'[Number(unitNumber[1]) - 1]}號機` : unit;
       pending = current.unit ? null : 'unit';
       if (inline) {
         current.started = true; pending = null;
@@ -114,10 +116,11 @@
       if (/今日值班|^\S*值\s+[A-Z]班|^共用設備\s*[:：]/.test(line)) continue;
       if (pending === 'date') { pending = null; continue; }
       if (pending === 'unit') { readUnit(line); continue; }
-      if (current?.started) current.lines.push(line);
+      // 已有機組並跳過日期等包裝後，正文可直接開始，不強制要求內容標題。
+      if (current?.unit) { current.started = true; current.lines.push(line); }
     }
     flush();
-    invariant(jobs.length, '未找到機組／區域與請修內容，請保留這兩個標題及內容。');
+    invariant(jobs.length, '未找到機組／區域與請修內容，請保留機組／區域標題及完整正文。');
     return jobs;
   }
 
