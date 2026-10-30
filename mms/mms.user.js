@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.21
+// @version      0.1.22
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.21';
+  const VERSION = '0.1.22';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -130,6 +130,13 @@
       if (parsed.length === 1) return parsed[0].replace(/\s/g, '');
     } catch { /* 舊日誌可能是非請修文字。 */ }
     return clean(value).replace(/\s/g, '');
+  }
+
+  function fieldJobs(raw, inspectionEnabled = false) {
+    const jobs = inspectionEnabled && !clean(raw) ? [] : parseLine(raw);
+    const inspection = '機組別：三部機\n請修內容：現場巡檢';
+    if (inspectionEnabled && !jobs.some(job => canonical(job) === canonical(inspection))) jobs.push(inspection);
+    return jobs;
   }
 
   function isTbm(value) {
@@ -420,7 +427,7 @@
     // 只區分操作鎖所屬分頁，不用於驗證、加密或任何安全憑證。
     return `local-${Date.now().toString(36)}-${Array.from({ length: 4 }, () => Math.random().toString(36).slice(2)).join('')}`;
   }
-  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, MAX_AGE, invariant, clean, dateKey, today, parseLine, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings, createOwner, cleanLineMessages };
+  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, MAX_AGE, invariant, clean, dateKey, today, parseLine, fieldJobs, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings, createOwner, cleanLineMessages };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   if (typeof document === 'undefined') return;
   // 成功 alert 可能在回應頁的 inline script 立即執行，須先安裝，再等 DOM 建立介面。
@@ -513,6 +520,7 @@
     <label id="fieldArea">貼上 LINE 工項<textarea id="raw" placeholder="直接貼整段 LINE 訊息"></textarea></label>
     <div id="officeArea" hidden><label>本次工作項目<select id="officeItem"></select></label><div id="manualArea" hidden><label>本次工作項目<input id="officeText" type="text" maxlength="200" placeholder="手動輸入工作內容"></label><button id="addFavorite" class="secondary" type="button">加入常用項目</button></div></div>
     <div id="holidayArea" hidden><label>加班時數<select id="holidayHours">${Array.from({ length: 5 }, (_, i) => `<option value="${i + 8}">${i + 8} 小時</option>`).join('')}</select></label><label>工作內容與經過<textarea id="holidayText" maxlength="2000" placeholder="輸入本次假日加班工作內容"></textarea></label></div>
+    <label id="inspectionArea"><input id="inspectionEnabled" type="checkbox"> 現場巡檢</label>
     <section id="overtimeArea"><label><input id="overtimeEnabled" type="checkbox"> 平日加班</label><div id="overtimeFields" hidden><label>加班時數<select id="overtimeHours"><option value="2">2 小時</option><option value="3">3 小時</option><option value="4">4 小時</option></select></label><label>加班工作內容<textarea id="overtimeText" maxlength="2000"></textarea></label></div></section>
     <button id="fill" type="button">填寫</button>
     <p id="status"></p>
@@ -525,6 +533,7 @@
     $('leaveHours').value = value.leaveHours; $('morningLeaveHours').value = value.morningLeaveHours; $('holidayHours').value = value.holidayHours;
     // 一般開頁預設不勾；只有當次跨頁草稿還原加班啟用狀態。
     $('holidayText').value = value.holidayText; $('overtimeEnabled').checked = restoreDraft && value.overtimeHours > 0;
+    $('inspectionEnabled').checked = restoreDraft && value.inspectionEnabled === true;
     $('overtimeHours').value = value.lastOvertimeHours; $('overtimeText').value = value.overtimeText;
   }
   displayParameters(configuration);
@@ -544,6 +553,7 @@
   function displayMode() {
     const mode = $('mode').value, officeMode = ['office', 'afternoon', 'morning'].includes(mode);
     $('officeArea').hidden = !officeMode; $('fieldArea').hidden = mode !== 'field';
+    $('inspectionArea').hidden = mode !== 'field';
     $('leaveArea').hidden = mode !== 'afternoon'; $('holidayArea').hidden = mode !== 'holiday';
     $('morningLeaveArea').hidden = mode !== 'morning';
     $('manualArea').hidden = Boolean($('officeItem').value);
@@ -747,7 +757,7 @@
   function parameters() {
     const value = currentSettings();
     invariant(value.people.length, '請先從網站讀取並勾選填寫人員。');
-    return { ...value, date: dateKey($('date').value), dept: department() };
+    return { ...value, inspectionEnabled: value.mode === 'field' && $('inspectionEnabled').checked, date: dateKey($('date').value), dept: department() };
   }
   function rememberPeople() {
     try {
@@ -915,7 +925,7 @@
     invariant(Date.now() - draft.created <= MAX_AGE, '跨頁草稿已超過 10 分鐘，請重新整理工項。');
     invariant(draft.explicitDate || draft.date === today(), '已跨台灣午夜，請重新核對工作日期。');
     $('date').value = draft.date; displayPeople(draft.people);
-    displayParameters(settings({ ...configuration, ...draft, total: 8, schema: 1, memory: true }), true);
+    displayParameters({ ...settings({ ...configuration, ...draft, total: 8, schema: 1, memory: true }), inspectionEnabled: draft.inspectionEnabled === true }, true);
     $('mode').value = draft.mode || 'field'; displayMode();
     if (draft.mode === 'field') $('raw').value = draft.requested.join('\n\n');
     if (['office', 'afternoon', 'morning'].includes(draft.mode)) { displayOffice(draft.requested[0]); displayMode(); }
@@ -929,7 +939,7 @@
     const destination = await findWorkDate(draft.date, draft.dept); move(draft, destination);
   }
   $('fill').onclick = () => action(async () => {
-    const params = parameters(), requested = params.mode === 'leave' ? ['請假'] : ['office', 'afternoon', 'morning'].includes(params.mode) ? [officeInput()] : params.mode === 'holiday' ? [clean($('holidayText').value)] : parseLine($('raw').value);
+    const params = parameters(), requested = params.mode === 'leave' ? ['請假'] : ['office', 'afternoon', 'morning'].includes(params.mode) ? [officeInput()] : params.mode === 'holiday' ? [clean($('holidayText').value)] : fieldJobs($('raw').value, params.inspectionEnabled);
     if (params.mode === 'holiday') invariant(requested[0], '請填入假日加班的工作內容與經過。');
     workload(params, params.date, requested);
     const draft = { ...params, requested, hours: null, explicitDate: params.date !== today(), created: Date.now() };
