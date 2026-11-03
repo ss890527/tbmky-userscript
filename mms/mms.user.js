@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.23
+// @version      0.1.25
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.23';
+  const VERSION = '0.1.25';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -384,13 +384,11 @@
       invariant(requested.length === 1 && clean(requested[0]) && !isTbm(requested[0]), '本次工作請填一項內容。');
       const rows = existing.map(row => ({ ...row, seq: Number(row.seq), hour: Number(row.hour), added: false }));
       invariant(rows.every(row => clean(row.context) && Number.isInteger(row.seq) && row.seq > 0 && row.seq <= 999 && Number.isFinite(row.hour) && row.hour >= 0) && new Set(valid).size === rows.length, '既有工項序號或時數格式有誤。');
-      const matches = common.filter(row => !previousOvertime.has(Number(row.seq)) && canonical(row.context) === canonical(requested[0])).sort((a, b) => Number(a.seq) - Number(b.seq));
-      const reusable = rows.filter(row => !previousOvertime.has(row.seq) && canonical(row.context) === canonical(requested[0]) && row.hour === base && Number(row.progress) === 100).sort((a, b) => a.seq - b.seq);
-      const own = matches.find(row => Number(row.hour) === base && Number(row.progress) === 100) || matches[0];
-      let main = own && rows.find(row => row.seq === Number(own.seq));
-      if (!main || main.hour !== base || Number(main.progress) !== 100) main = reusable[0] || main;
+      const matches = common.filter(row => !previousOvertime.has(Number(row.seq)) && canonical(row.context) === canonical(requested[0]));
+      invariant(matches.length <= 1, '本人有多個相同工項，請先在網站核對。');
+      let main = matches[0] && rows.find(row => row.seq === Number(matches[0].seq));
       const changes = [];
-      if (!main || Number(main.progress) !== 100 || (frozen.has(main.seq) && main.hour !== base)) {
+      if (!main || (frozen.has(main.seq) && main.hour !== base)) {
         main = { context: clean(requested[0]), seq: Math.max(0, ...valid) + 1, hour: base, progress: 100, added: true }; rows.push(main);
       } else if (main.hour !== base) { changes.push({ seq: main.seq, before: main.hour, after: base }); main.hour = base; }
       plan = { rows, changes, assignments: [main.seq], personAssignments: assigned.map(person => ({ name: person.name, sequences: [main.seq], total: fullLeave ? 8 : total })) };
@@ -399,9 +397,6 @@
       const reusable = plan.rows.filter(row => !plan.personAssignments.some(person => person.sequences.includes(row.seq)) && common.some(old => Number(old.seq) === row.seq) && (previousOvertime.has(row.seq) || canonical(row.context) === canonical(options.overtimeText)) && Number(row.progress) === 100);
       invariant(reusable.length <= 1, '本人有多個加班工項，請先在網站核對。');
       let extra = reusable[0];
-      if (!extra || extra.hour !== overtime || clean(extra.context) !== options.overtimeText) {
-        extra = plan.rows.filter(row => !plan.personAssignments.some(person => person.sequences.includes(row.seq)) && canonical(row.context) === canonical(options.overtimeText) && row.hour === overtime && Number(row.progress) === 100).sort((a, b) => a.seq - b.seq)[0] || extra;
-      }
       if (!extra || (frozen.has(extra.seq) && (extra.hour !== overtime || clean(extra.context) !== options.overtimeText))) {
         extra = { context: options.overtimeText, seq: Math.max(0, ...plan.rows.map(row => row.seq)) + 1, hour: overtime, progress: 100, added: true }; plan.rows.push(extra);
       } else {
@@ -470,10 +465,6 @@
     releaseSaveAlert = restore;
   }
   installSaveAlert();
-  // 僅辨識獨立的成功 alert 敘述，不執行伺服器回應中的任何程式。
-  function savedResponse(doc) {
-    return [...doc.querySelectorAll('script:not([src])')].some(script => /^\s*(?:window\.)?alert\(\s*(['"])\s*儲存成功\s*[!！]?\s*\1\s*\)\s*;\s*(?:(?:window\.)?location\.|setTimeout\(|$)/.test(script.textContent));
-  }
   function start() {
   const path = location.pathname.replace(/\/$/, '') || '/';
   if (!/^\/MMS310(?:\/|$)/i.test(path) && path !== '/M300' && !(path === '/' && document.querySelector('a[href="/M300"]'))) return;
@@ -928,41 +919,7 @@
     sessionStorage.removeItem(SAVE_DONE_KEY);
     sessionStorage.setItem(SAVE_RECEIPT_KEY, JSON.stringify({ created: Date.now() }));
     installSaveAlert();
-    let submitted = false, submission;
-    const intercept = event => {
-      if (event.target !== form || event.submitter !== save) return;
-      submitted = true;
-      // 最後的冒泡階段才檢查網站是否取消；不略過 inline／form／document 驗證。
-      if (event.defaultPrevented) return;
-      event.preventDefault();
-      submission = (async () => {
-        const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
-        try {
-          const data = new FormData(form, save);
-          const enctype = (save.getAttribute('formenctype') || form.enctype).toLowerCase();
-          invariant(['application/x-www-form-urlencoded', 'multipart/form-data'].includes(enctype), '存檔編碼不支援，未送出。');
-          const body = enctype === 'multipart/form-data' ? data : new URLSearchParams([...data].map(([key, value]) => [key, typeof value === 'string' ? value : value.name]));
-          const response = await fetch(destination.href, { method: 'POST', body, credentials: 'same-origin', redirect: 'error', signal: controller.signal });
-          invariant(response.ok && new URL(response.url).origin === location.origin, '存檔回應錯誤；請自行回查，未自動重送。');
-          const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
-          invariant(savedResponse(doc), '存檔回應未確認成功；請自行回查，未自動重送。');
-          releaseSaveAlert(); saveSucceeded = true;
-          sessionStorage.setItem(SAVE_DONE_KEY, String(Date.now()));
-          finishSave();
-          location.assign('/MMS310');
-        } catch (error) {
-          releaseSaveAlert();
-          throw new Error(`${error.message}（結果不明時請先回查日誌，勿直接重填。）`);
-        } finally { clearTimeout(timer); }
-      })();
-    };
-    window.addEventListener('submit', intercept);
-    try { save.click(); } finally { window.removeEventListener('submit', intercept); }
-    if (!submission) {
-      releaseSaveAlert();
-      if (!saveSucceeded) status(`已填寫並核對 ${draft.date}；${submitted ? '網站已取消存檔，未背景送出。' : '網站未觸發存檔提交，未背景送出。'}`, true);
-    }
-    if (submission) await submission;
+    save.click();
   }
   async function proceed(draft) {
     invariant(Date.now() - draft.created <= MAX_AGE, '跨頁草稿已超過 10 分鐘，請重新整理工項。');
