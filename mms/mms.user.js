@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.25
+// @version      0.1.26
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔。
 // @match        https://*/
 // @match        http://*/
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.25';
+  const VERSION = '0.1.26';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -387,6 +387,10 @@
       const matches = common.filter(row => !previousOvertime.has(Number(row.seq)) && canonical(row.context) === canonical(requested[0]));
       invariant(matches.length <= 1, '本人有多個相同工項，請先在網站核對。');
       let main = matches[0] && rows.find(row => row.seq === Number(matches[0].seq));
+      // 請假類型本人沒有可用列時，沿用同內容、同時數、100% 的最小序號，不改原列。
+      if (['morning', 'afternoon', 'leave'].includes(mode) && (!main || (frozen.has(main.seq) && main.hour !== base))) {
+        main = rows.filter(row => !previousOvertime.has(row.seq) && canonical(row.context) === canonical(requested[0]) && row.hour === base && Number(row.progress) === 100).sort((a, b) => a.seq - b.seq)[0] || main;
+      }
       const changes = [];
       if (!main || (frozen.has(main.seq) && main.hour !== base)) {
         main = { context: clean(requested[0]), seq: Math.max(0, ...valid) + 1, hour: base, progress: 100, added: true }; rows.push(main);
