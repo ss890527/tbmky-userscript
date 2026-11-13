@@ -1,26 +1,27 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.30
-// @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數、預定完成日、保養卡、轉簽選課長（不送出）及檢修經過帶入簽核意見。
+// @version      0.1.31
+// @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數、預定完成日、保養卡、轉簽選課長（不送出）及檢修經過帶入簽核意見，並自動確定其儲存成功提示。
 // @match        https://*/
 // @match        http://*/
 // @match        https://*/M300*
 // @match        http://*/M300*
 // @match        https://*/MMS310*
 // @match        http://*/MMS310*
+// @match        https://*/Home/*
+// @match        http://*/Home/*
 // @updateURL    https://raw.githubusercontent.com/ss890527/tbmky-userscript/main/mms/mms.meta.js
 // @downloadURL  https://raw.githubusercontent.com/ss890527/tbmky-userscript/main/mms/mms.user.js
 // @grant        none
 // @sandbox      raw
-// @noframes
 // @run-at       document-start
 // ==/UserScript==
 // 正式發布時由準備發布.cjs 加入固定 @updateURL / @downloadURL。
 
 (() => {
   'use strict';
-  const VERSION = '0.1.30';
+  const VERSION = '0.1.31';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -468,6 +469,28 @@
     timer = setTimeout(restore, SAVE_RECEIPT_AGE);
     releaseSaveAlert = restore;
   }
+  // 保修記事「儲存後關閉」只在按下後2分鐘內、訊息恰為「儲存成功！」時自動確定；框架內需在回應頁 inline alert 前安裝。
+  const REPAIR_SAVE_KEY = 'moonbase.mms.repair.save-receipt.v1';
+  function repairSavePending() {
+    try { const created = Number(sessionStorage.getItem(REPAIR_SAVE_KEY)); return created > 0 && Date.now() >= created && Date.now() - created <= 120000; } catch { return false; }
+  }
+  function installRepairAlert(win) {
+    try {
+      if (win.__moonbaseRepairAlert) return;
+      const original = win.alert;
+      win.alert = function (message, ...args) {
+        if (repairSavePending() && /^儲存成功[!！]?$/.test(String(message).replace(/\s/g, ''))) {
+          try { sessionStorage.removeItem(REPAIR_SAVE_KEY); } catch {}
+          console.info(`[MMS小助手 v${VERSION}] 已自動確定保修記事「儲存成功！」。`);
+          return;
+        }
+        return Reflect.apply(original, win, [message, ...args]);
+      };
+      win.__moonbaseRepairAlert = true;
+    } catch { /* 無法包裝時維持網站原生提示。 */ }
+  }
+  // 框架只處理 /Home/ 頁的成功提示，其餘功能都由頂層頁面執行。
+  if (window.top !== window) { if (/^\/Home\//i.test(location.pathname)) installRepairAlert(window); return; }
   installSaveAlert();
   // 請修單（/Home/SetCmEvent/）位於首頁第二層同網域框架；第一次看到欄位時只補空白或 0，不覆蓋、不存檔。
   const REPAIR_PATH = /^\/Home\/SetCmEvent\//i;
@@ -576,6 +599,8 @@
       if (!button || !/^儲存後關閉$/.test(clean(button.value || button.textContent))) return;
       const text = doc.getElementById('OVERHAUL_PROC_DESCR')?.value ?? '';
       pendingNote = clean(text) ? { host: view.parent, text, created: Date.now() } : null;
+      try { sessionStorage.setItem(REPAIR_SAVE_KEY, String(Date.now())); } catch {}
+      installRepairAlert(view); installRepairAlert(view.parent);
     }, true);
   }
   function noteFormOpen(win, depth = 0) {
