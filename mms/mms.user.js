@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.29
-// @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數、預定完成日、保養卡及轉簽選課長（不送出）。
+// @version      0.1.30
+// @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數、預定完成日、保養卡、轉簽選課長（不送出）及檢修經過帶入簽核意見。
 // @match        https://*/
 // @match        http://*/
 // @match        https://*/M300*
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.29';
+  const VERSION = '0.1.30';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -564,15 +564,52 @@
     select.dataset.moonbasePrefill = 'choosing';
     chooseSigner(doc, select).catch(error => { select.dataset.moonbasePrefill = 'failed'; console.warn(`[MMS小助手 v${VERSION}] 轉簽未自動選人（${error.message}），請手動選擇。`); });
   }
+  // 保修記事按「儲存後關閉」時記下檢修經過；該框架關閉後，若首頁框架簽核意見 #content 空白就貼入，不覆蓋、不送出。
+  const NOTE_AGE = 120000, noteWatched = new WeakSet();
+  let pendingNote = null;
+  function watchNote(doc) {
+    const view = doc?.defaultView;
+    if (!view || noteWatched.has(doc) || !REPAIR_PATH.test(view.location.pathname) || !doc.getElementById('OVERHAUL_PROC_DESCR')) return;
+    noteWatched.add(doc);
+    doc.addEventListener('click', event => {
+      const button = event.target?.closest?.('input,button');
+      if (!button || !/^儲存後關閉$/.test(clean(button.value || button.textContent))) return;
+      const text = doc.getElementById('OVERHAUL_PROC_DESCR')?.value ?? '';
+      pendingNote = clean(text) ? { host: view.parent, text, created: Date.now() } : null;
+    }, true);
+  }
+  function noteFormOpen(win, depth = 0) {
+    if (depth > 4) return false;
+    for (let i = 0; i < win.frames.length; i++) {
+      try { const child = win.frames[i]; if (REPAIR_PATH.test(child.location.pathname) || child.document.getElementById('OVERHAUL_PROC_DESCR') || noteFormOpen(child, depth + 1)) return true; } catch { /* 跨網域框架略過。 */ }
+    }
+    return false;
+  }
+  function pasteNote() {
+    if (!pendingNote) return;
+    if (Date.now() - pendingNote.created > NOTE_AGE) { pendingNote = null; return; }
+    const { host, text } = pendingNote;
+    let doc; try { doc = host.document; } catch { pendingNote = null; return; }
+    if (doc.readyState !== 'complete' || !CARD_PATH.test(host.location.pathname) || noteFormOpen(host)) return;
+    const field = doc.getElementById('content');
+    if (!field) return;
+    pendingNote = null;
+    if (clean(field.value)) { console.info(`[MMS小助手 v${VERSION}] 簽核意見已有內容，未貼入檢修經過。`); return; }
+    if (field.disabled || field.readOnly) return;
+    Object.getOwnPropertyDescriptor(host.HTMLTextAreaElement.prototype, 'value').set.call(field, text);
+    field.dispatchEvent(new host.Event('input', { bubbles: true }));
+    field.dispatchEvent(new host.Event('change', { bubbles: true }));
+    console.info(`[MMS小助手 v${VERSION}] 已將檢修經過貼入簽核意見，請自行核對後送出。`);
+  }
   function scanRepairFrames(win, depth = 0) {
     if (depth > 4) return;
     for (let i = 0; i < win.frames.length; i++) {
       const child = win.frames[i];
-      try { if (child.document.readyState === 'complete') { prefillRepair(child.document); prefillCard(child.document); prefillSign(child.document); } } catch { continue; }
+      try { if (child.document.readyState === 'complete') { prefillRepair(child.document); prefillCard(child.document); prefillSign(child.document); watchNote(child.document); } } catch { continue; }
       scanRepairFrames(child, depth + 1);
     }
   }
-  setInterval(() => { try { scanRepairFrames(window); } catch {} }, 700);
+  setInterval(() => { try { scanRepairFrames(window); } catch {} try { pasteNote(); } catch {} }, 700);
   function start() {
   const path = location.pathname.replace(/\/$/, '') || '/';
   if (!/^\/MMS310(?:\/|$)/i.test(path) && path !== '/M300' && !(path === '/' && document.querySelector('a[href="/M300"]'))) return;
