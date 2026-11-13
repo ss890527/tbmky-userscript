@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.27
-// @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數與預定完成日。
+// @version      0.1.28
+// @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數、預定完成日與保養卡。
 // @match        https://*/
 // @match        http://*/
 // @match        https://*/M300*
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.27';
+  const VERSION = '0.1.28';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -491,11 +491,45 @@
     if (filled.length) console.info(`[MMS小助手 v${VERSION}] 請修單已預填：${filled.join('、')}`);
     return filled;
   }
+  // 請修單首頁框架（/Home/APICM/）的保養卡欄位停用且由網站選卡小視窗回填；空白時代點放大鏡及清單中的固定卡號，沿用網站原生流程。
+  const CARD_PATH = /^\/Home\/APICM\//i, CARD_PICKER = /^\/Home\/APIEQCARD(?:\/|$)/i, CARD_ID = 'U1-05-000-0000';
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  async function pickCard(view, field) {
+    let searched = false;
+    for (const deadline = Date.now() + 20000; Date.now() < deadline; await pause(300)) {
+      if (clean(field.value) === CARD_ID) { field.dataset.moonbasePrefill = 'filled'; console.info(`[MMS小助手 v${VERSION}] 保養卡已選 ${CARD_ID}`); return; }
+      if (!field.isConnected) return;
+      for (let i = 0; i < view.frames.length; i++) {
+        const picker = view.frames[i];
+        let doc; try { doc = picker.document; } catch { continue; }
+        if (!CARD_PICKER.test(picker.location.pathname) || doc.readyState !== 'complete' || typeof picker.refPara !== 'function') continue;
+        const link = [...doc.querySelectorAll('a')].find(a => clean(a.textContent) === CARD_ID);
+        if (link) { if (!link.dataset.moonbaseClicked) { link.dataset.moonbaseClicked = '1'; link.click(); } continue; }
+        const keyword = doc.querySelector('input[name="keyword"]');
+        if (!searched && keyword?.form) { searched = true; keyword.value = CARD_ID; picker.HTMLFormElement.prototype.submit.call(keyword.form); }
+      }
+    }
+    field.dataset.moonbasePrefill = 'failed';
+    console.warn(`[MMS小助手 v${VERSION}] 保養卡 ${CARD_ID} 未在 20 秒內回填，請手動選擇。`);
+  }
+  function prefillCard(doc) {
+    const view = doc?.defaultView;
+    if (!view || !CARD_PATH.test(view.location.pathname)) return;
+    const field = doc.getElementById('EQ_ID');
+    if (!field || field.dataset.moonbasePrefill) return;
+    field.dataset.moonbasePrefill = 'seen';
+    if (clean(field.value)) return;
+    const opener = field.parentElement?.querySelector('[onclick*="winSearch"][onclick*="EQ_ID"]');
+    if (!opener) { console.warn(`[MMS小助手 v${VERSION}] 找不到保養卡放大鏡，請手動選擇。`); return; }
+    field.dataset.moonbasePrefill = 'picking';
+    opener.click();
+    pickCard(view, field).catch(error => console.warn(`[MMS小助手 v${VERSION}] 保養卡選取中止：${error.message}`));
+  }
   function scanRepairFrames(win, depth = 0) {
     if (depth > 4) return;
     for (let i = 0; i < win.frames.length; i++) {
       const child = win.frames[i];
-      try { if (child.document.readyState === 'complete') prefillRepair(child.document); } catch { continue; }
+      try { if (child.document.readyState === 'complete') { prefillRepair(child.document); prefillCard(child.document); } } catch { continue; }
       scanRepairFrames(child, depth + 1);
     }
   }
