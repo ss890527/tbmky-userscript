@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.26
-// @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔。
+// @version      0.1.27
+// @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數與預定完成日。
 // @match        https://*/
 // @match        http://*/
 // @match        https://*/M300*
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.26';
+  const VERSION = '0.1.27';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -469,6 +469,37 @@
     releaseSaveAlert = restore;
   }
   installSaveAlert();
+  // 請修單（/Home/SetCmEvent/）位於首頁第二層同網域框架；第一次看到欄位時只補空白或 0，不覆蓋、不存檔。
+  const REPAIR_PATH = /^\/Home\/SetCmEvent\//i;
+  const REPAIR_DEFAULTS = [['MANPOWER_NBR', () => '2', /^0?$/], ['MAN_HOUR_NBR', () => '2', /^0?$/], ['SCHED_COMPLETE_DT', () => today(), /^$/]];
+  function prefillRepair(doc) {
+    const view = doc?.defaultView;
+    if (!view || !REPAIR_PATH.test(view.location.pathname)) return [];
+    const filled = [];
+    for (const [id, value, empty] of REPAIR_DEFAULTS) {
+      const element = doc.getElementById(id);
+      if (!element || element.dataset.moonbasePrefill) continue;
+      element.dataset.moonbasePrefill = 'seen';
+      if (element.disabled || element.readOnly || !empty.test(clean(element.value))) continue;
+      const text = value();
+      Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, 'value').set.call(element, text);
+      element.dispatchEvent(new view.Event('input', { bubbles: true }));
+      element.dispatchEvent(new view.Event('change', { bubbles: true }));
+      if (element.value === text) { element.dataset.moonbasePrefill = 'filled'; filled.push(id); }
+      else console.warn(`[MMS小助手 v${VERSION}] 請修單 ${id} 預填後讀回不符，請手動填寫。`);
+    }
+    if (filled.length) console.info(`[MMS小助手 v${VERSION}] 請修單已預填：${filled.join('、')}`);
+    return filled;
+  }
+  function scanRepairFrames(win, depth = 0) {
+    if (depth > 4) return;
+    for (let i = 0; i < win.frames.length; i++) {
+      const child = win.frames[i];
+      try { if (child.document.readyState === 'complete') prefillRepair(child.document); } catch { continue; }
+      scanRepairFrames(child, depth + 1);
+    }
+  }
+  setInterval(() => { try { scanRepairFrames(window); } catch {} }, 700);
   function start() {
   const path = location.pathname.replace(/\/$/, '') || '/';
   if (!/^\/MMS310(?:\/|$)/i.test(path) && path !== '/M300' && !(path === '/' && document.querySelector('a[href="/M300"]'))) return;
