@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.28
-// @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數、預定完成日與保養卡。
+// @version      0.1.29
+// @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數、預定完成日、保養卡及轉簽選課長（不送出）。
 // @match        https://*/
 // @match        http://*/
 // @match        https://*/M300*
@@ -20,7 +20,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.28';
+  const VERSION = '0.1.29';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -525,11 +525,50 @@
     opener.click();
     pickCard(view, field).catch(error => console.warn(`[MMS小助手 v${VERSION}] 保養卡選取中止：${error.message}`));
   }
+  // 轉簽：保養卡處理完後按「轉簽」、選本人部門（導覽列代碼）並選唯一「課長」；只選不送出，已有人員不動。
+  const SIGN_TITLE = /^課長(?:\s|$)/;
+  async function chooseSigner(doc, select) {
+    const view = doc.defaultView;
+    const own = /^[\dA-Z]{4}/.exec(clean(document.querySelector('.tpl-header-navbar > ul > li:first-child > a')?.textContent))?.[0];
+    if (!own) throw new Error('無法辨識本人部門');
+    doc.getElementById('tbtn')?.click();
+    const deptField = doc.getElementById('DEPT_List1');
+    if (clean(deptField?.value) !== own) {
+      const item = doc.querySelector(`#firstDropDownTree li[data-dataattr="${own}"] > a`);
+      if (!item) throw new Error(`部門清單找不到 ${own}`);
+      item.click();
+    }
+    for (const deadline = Date.now() + 15000; Date.now() < deadline; await pause(300)) {
+      if (!select.isConnected) return;
+      if (clean(select.value)) { select.dataset.moonbasePrefill = 'kept'; return; }
+      if (deptField && clean(deptField.value) !== own) continue;
+      const chiefs = [...select.options].filter(option => clean(option.value) && SIGN_TITLE.test(clean(option.text)));
+      if (!chiefs.length) continue;
+      if (chiefs.length > 1) throw new Error('課長不只一位');
+      Object.getOwnPropertyDescriptor(view.HTMLSelectElement.prototype, 'value').set.call(select, chiefs[0].value);
+      select.dispatchEvent(new view.Event('change', { bubbles: true }));
+      if (select.value !== chiefs[0].value) throw new Error('選取後讀回不符');
+      select.dataset.moonbasePrefill = 'filled';
+      console.info(`[MMS小助手 v${VERSION}] 轉簽已選課長，請自行核對後送出。`);
+      return;
+    }
+    throw new Error('15 秒內未載入課長');
+  }
+  function prefillSign(doc) {
+    const view = doc?.defaultView;
+    if (!view || !CARD_PATH.test(view.location.pathname)) return;
+    const select = doc.getElementById('EMP_CD1');
+    if (!select || select.dataset.moonbasePrefill || doc.getElementById('EQ_ID')?.dataset.moonbasePrefill === 'picking') return;
+    select.dataset.moonbasePrefill = 'seen';
+    if (clean(select.value)) return;
+    select.dataset.moonbasePrefill = 'choosing';
+    chooseSigner(doc, select).catch(error => { select.dataset.moonbasePrefill = 'failed'; console.warn(`[MMS小助手 v${VERSION}] 轉簽未自動選人（${error.message}），請手動選擇。`); });
+  }
   function scanRepairFrames(win, depth = 0) {
     if (depth > 4) return;
     for (let i = 0; i < win.frames.length; i++) {
       const child = win.frames[i];
-      try { if (child.document.readyState === 'complete') { prefillRepair(child.document); prefillCard(child.document); } } catch { continue; }
+      try { if (child.document.readyState === 'complete') { prefillRepair(child.document); prefillCard(child.document); prefillSign(child.document); } } catch { continue; }
       scanRepairFrames(child, depth + 1);
     }
   }
