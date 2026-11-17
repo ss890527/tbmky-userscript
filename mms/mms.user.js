@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS工作日誌小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.31
+// @version      0.1.32
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數、預定完成日、保養卡、轉簽選課長（不送出）及檢修經過帶入簽核意見，並自動確定其儲存成功提示。
 // @match        https://*/
 // @match        http://*/
@@ -21,12 +21,14 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.31';
+  const VERSION = '0.1.32';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
   const OFFICE_DEFAULTS = ['文書處理', '資安文書處理'];
   const DRAFT_KEY = 'moonbase.mms.worklog.draft.v1';
+  // 本週紀錄 Web App 網址與密鑰；屬連線憑證，與一般設定分開存放，不進跨頁草稿。
+  const LOG_SOURCE_KEY = 'moonbase.mms.worklog.logsource.v1';
   const MAX_AGE = 10 * 60 * 1000;
   const invariant = (ok, message) => { if (!ok) throw new Error(message); };
   const clean = value => String(value ?? '').trim();
@@ -73,6 +75,15 @@
     return lines.join('\n').trim();
   }
 
+  // 共用區統一用字（2026-11-17 使用者確認）：S000、COMMON、共同區及含「共用」二字者都寫成共用區。
+  function unitName(value) {
+    const unit = clean(value);
+    const unitNumber = /^S00([123])$/i.exec(unit);
+    if (unitNumber) return `${'一二三'[Number(unitNumber[1]) - 1]}號機`;
+    if (/^(?:S000|COMMON|共同區)$/i.test(unit) || unit.includes('共用')) return '共用區';
+    return unit;
+  }
+
   function parseLine(raw) {
     invariant(typeof raw === 'string' && raw.trim(), '請先貼上 LINE 工作訊息。');
     const jobs = [];
@@ -80,9 +91,7 @@
     const readUnit = value => {
       // 網頁複製可能把兩個欄位擠在同一行；只在尚待機組值時拆第一個內容標題。
       const inline = /^(.*?)請\s*修\s*內\s*容\s*[:：]\s*(.*)$/.exec(value);
-      const unit = clean(inline ? inline[1] : value);
-      const unitNumber = /^S00([123])$/i.exec(unit);
-      current.unit = unitNumber ? `${'一二三'[Number(unitNumber[1]) - 1]}號機` : unit;
+      current.unit = unitName(inline ? inline[1] : value);
       pending = current.unit ? null : 'unit';
       if (inline) {
         current.started = true; pending = null;
@@ -131,6 +140,49 @@
       if (parsed.length === 1) return parsed[0].replace(/\s/g, '');
     } catch { /* 舊日誌可能是非請修文字。 */ }
     return clean(value).replace(/\s/g, '');
+  }
+
+  // 工作聯絡書產生器「本週紀錄」Web App → 灰系統文字框。缺機組或內容的列不帶入，回報筆數。
+  const WEEKLY_LOG_ERRORS = {
+    NO_KEY_CONFIGURED: '試算表尚未產生密鑰：請在 Apps Script 執行 setupMmsWeeklyLogKey。',
+    BAD_KEY: '密鑰不符（可能已更換），已清除本機紀錄；請再按「從本週紀錄帶入」輸入新密鑰。',
+    BAD_DATE: '工作日期格式不正確。',
+    SERVER_ERROR: '試算表讀取失敗，請稍後再試。'
+  };
+  function weeklyLogSource(value) {
+    const url = clean(value?.url), key = clean(value?.key);
+    invariant(/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url), '本週紀錄網址需為 https://script.google.com/macros/s/…/exec。');
+    invariant(/^[\w-]{16,128}$/.test(key), '密鑰格式不正確，請重新複製。');
+    return { schema: 1, url, key };
+  }
+  function weeklyLogText(items) {
+    invariant(Array.isArray(items), '本週紀錄回傳格式不正確。');
+    const usable = [];
+    let skipped = 0;
+    for (const item of items) {
+      const unit = unitName(item?.unit), content = clean(item?.content).replace(/\r\n?/g, '\n');
+      if (unit && content) usable.push({ unit, content, source: clean(item?.source) }); else skipped++;
+    }
+    return {
+      text: usable.map(job => `機組別：${job.unit}\n請修內容：${job.content}`).join('\n\n'),
+      count: usable.length, three: usable.filter(job => job.source === '三部機').length, skipped
+    };
+  }
+  async function fetchWeeklyLog(source, date, fetcher = globalThis.fetch) {
+    const day = dateKey(date).replaceAll('-', '/');
+    const url = `${source.url}?key=${encodeURIComponent(source.key)}&date=${encodeURIComponent(day)}`;
+    let response, body;
+    try { response = await fetcher(url, { cache: 'no-store', credentials: 'omit', redirect: 'follow' }); }
+    catch (error) { throw new Error(`連不到本週紀錄（${error.message}）。請確認網路；若網址已更換，按住 Shift 再按「從本週紀錄帶入」重新設定。`); }
+    invariant(response.ok, `本週紀錄回應 HTTP ${response.status}；請確認 Web App 已部署新版本。`);
+    try { body = await response.json(); } catch { throw new Error('本週紀錄回應不是 JSON；請確認 Web App 存取權為「任何人」並已部署新版本。'); }
+    if (!body?.ok) {
+      const error = new Error(WEEKLY_LOG_ERRORS[body?.error] || `本週紀錄回應錯誤：${body?.error || '未知'}`);
+      error.code = body?.error;
+      throw error;
+    }
+    invariant(body.date === day, '本週紀錄回傳日期與工作日期不符，未帶入。');
+    return weeklyLogText(body.items);
   }
 
   function fieldJobs(raw, inspectionEnabled = false) {
@@ -432,7 +484,7 @@
     // 只區分操作鎖所屬分頁，不用於驗證、加密或任何安全憑證。
     return `local-${Date.now().toString(36)}-${Array.from({ length: 4 }, () => Math.random().toString(36).slice(2)).join('')}`;
   }
-  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, MAX_AGE, invariant, clean, dateKey, today, parseLine, fieldJobs, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings, createOwner, cleanLineMessages };
+  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, LOG_SOURCE_KEY, MAX_AGE, invariant, clean, dateKey, today, unitName, weeklyLogSource, weeklyLogText, fetchWeeklyLog, parseLine, fieldJobs, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings, createOwner, cleanLineMessages };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   if (typeof document === 'undefined') return;
   // 成功 alert 可能在回應頁的 inline script 立即執行，須先安裝，再等 DOM 建立介面。
@@ -687,7 +739,7 @@
     <label>填寫類型<select id="mode"><option value="field">灰系統專用</option><option value="office">通用</option><option value="morning">通用（上午請假）</option><option value="afternoon">通用（下午請假）</option><option value="leave">整天請假</option><option value="holiday">假日加班</option></select></label>
     <label id="leaveArea" hidden>下午請假時數<select id="leaveHours">${Array.from({ length: 4 }, (_, i) => `<option value="${i + 1}">${i + 1} 小時</option>`).join('')}</select></label>
     <label id="morningLeaveArea" hidden>上午請假時數<select id="morningLeaveHours">${Array.from({ length: 4 }, (_, i) => `<option value="${i + 1}">${i + 1} 小時</option>`).join('')}</select></label>
-    <label id="fieldArea">貼上 LINE 工項<textarea id="raw" placeholder="直接貼整段 LINE 訊息"></textarea></label>
+    <div id="fieldArea"><label>貼上 LINE 工項<textarea id="raw" placeholder="直接貼整段 LINE 訊息，或按下方從本週紀錄帶入"></textarea></label><button id="loadLog" class="secondary" type="button">從本週紀錄帶入</button></div>
     <div id="officeArea" hidden><label>本次工作項目<select id="officeItem"></select></label><div id="manualArea" hidden><label>本次工作項目<input id="officeText" type="text" maxlength="200" placeholder="手動輸入工作內容"></label><button id="addFavorite" class="secondary" type="button">加入常用項目</button></div></div>
     <div id="holidayArea" hidden><label>加班時數<select id="holidayHours">${Array.from({ length: 5 }, (_, i) => `<option value="${i + 8}">${i + 8} 小時</option>`).join('')}</select></label><label>工作內容與經過<textarea id="holidayText" maxlength="2000" placeholder="輸入本次假日加班工作內容"></textarea></label></div>
     <label id="inspectionArea"><input id="inspectionEnabled" type="checkbox"> 現場巡檢</label>
@@ -737,6 +789,32 @@
   function officeInput() { const text = clean($('officeItem').value || $('officeText').value); invariant(text && text.length <= 200 && !/[\r\n]/.test(text), '請輸入本次工作項目，或選擇常用項目（1～200 字）。'); invariant(!['請假', '整天請假'].includes(text), '請改選填寫類型「整天請假」。'); return text; }
   $('addFavorite').onclick = () => {
     try { const name = officeInput(); const value = officeSettings({ schema: 1, favorites: [...office.favorites, name], last: name }); localStorage.setItem(OFFICE_KEY, JSON.stringify(value)); invariant(localStorage.getItem(OFFICE_KEY) === JSON.stringify(value), '常用項目保存失敗。'); office = value; displayOffice(name); status('已加入常用項目。'); } catch (error) { status(error.message, true); }
+  };
+  $('loadLog').onclick = async event => {
+    if (busy) return;
+    let source = null;
+    try {
+      try { source = weeklyLogSource(JSON.parse(localStorage.getItem(LOG_SOURCE_KEY) || 'null')); } catch { source = null; }
+      if (!source || event.shiftKey) {
+        const url = window.prompt('貼上本週紀錄 Web App 網址（/exec 結尾）', source?.url || '');
+        if (url === null) return;
+        const key = window.prompt('貼上 MMS 讀取密鑰（Apps Script 執行 setupMmsWeeklyLogKey 取得）');
+        if (key === null) return;
+        source = weeklyLogSource({ url, key });
+      }
+      const date = $('date').value;
+      $('loadLog').disabled = true; status('讀取本週紀錄中…');
+      const result = await fetchWeeklyLog(source, date);
+      localStorage.setItem(LOG_SOURCE_KEY, JSON.stringify(source)); // 讀取成功才保存網址與密鑰。
+      const skippedNote = result.skipped ? `；${result.skipped} 筆缺機組或內容未帶入，請自行補上` : '';
+      if (!result.count) { status(`本週紀錄 ${date} 沒有可帶入的工項${skippedNote}。`, true); return; }
+      if (clean($('raw').value) && !window.confirm('文字框已有內容，要以本週紀錄取代嗎？')) { status('已取消，文字框未變更。'); return; }
+      $('raw').value = result.text;
+      status(`已帶入 ${date} 本週紀錄 ${result.count} 筆${result.three ? `（含三部機 ${result.three} 筆）` : ''}${skippedNote}。\n同日重新產生的新舊版本都會列出，請核對、刪掉不需要的再按「填寫」。`);
+    } catch (error) {
+      if (error.code === 'BAD_KEY') { try { localStorage.removeItem(LOG_SOURCE_KEY); } catch { /* 保留錯誤訊息。 */ } }
+      status(error.message, true);
+    } finally { $('loadLog').disabled = busy; }
   };
   function status(message, error = false) { $('status').textContent = message; $('status').classList.toggle('error', error); }
   function department(doc = document) {
