@@ -1,6 +1,6 @@
-# MMS工作日誌小助手
+# MMS填報小助手
 
-版本：0.1.32
+版本：0.1.33
 
 [安裝／更新腳本](https://raw.githubusercontent.com/ss890527/tbmky-userscript/main/mms/mms.user.js)
 

@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         MMS工作日誌小助手
+// @name         MMS填報小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.32
+// @version      0.1.33
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數、預定完成日、保養卡、轉簽選課長（不送出）及檢修經過帶入簽核意見，並自動確定其儲存成功提示。
 // @match        https://*/
 // @match        http://*/
@@ -21,7 +21,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.32';
+  const VERSION = '0.1.33';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -29,6 +29,7 @@
   const DRAFT_KEY = 'moonbase.mms.worklog.draft.v1';
   // 本週紀錄 Web App 網址與密鑰；屬連線憑證，與一般設定分開存放，不進跨頁草稿。
   const LOG_SOURCE_KEY = 'moonbase.mms.worklog.logsource.v1';
+  const FILLED_KEY = 'moonbase.mms.worklog.filled.v1';
   const MAX_AGE = 10 * 60 * 1000;
   const invariant = (ok, message) => { if (!ok) throw new Error(message); };
   const clean = value => String(value ?? '').trim();
@@ -484,7 +485,7 @@
     // 只區分操作鎖所屬分頁，不用於驗證、加密或任何安全憑證。
     return `local-${Date.now().toString(36)}-${Array.from({ length: 4 }, () => Math.random().toString(36).slice(2)).join('')}`;
   }
-  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, LOG_SOURCE_KEY, MAX_AGE, invariant, clean, dateKey, today, unitName, weeklyLogSource, weeklyLogText, fetchWeeklyLog, parseLine, fieldJobs, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings, createOwner, cleanLineMessages };
+  const core = { VERSION, TBM, SETTINGS_KEY, OFFICE_KEY, OFFICE_DEFAULTS, DRAFT_KEY, LOG_SOURCE_KEY, FILLED_KEY, MAX_AGE, invariant, clean, dateKey, today, unitName, weeklyLogSource, weeklyLogText, fetchWeeklyLog, parseLine, fieldJobs, canonical, isTbm, distribute, makePlan, makeOfficePlan, makeWorkPlan, sharedPeople, dutyPeriod, weekday, workload, officeSettings, mergeCsv, settings, saveSettings, createOwner, cleanLineMessages };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   if (typeof document === 'undefined') return;
   // 成功 alert 可能在回應頁的 inline script 立即執行，須先安裝，再等 DOM 建立介面。
@@ -733,7 +734,7 @@
     textarea{min-height:120px;resize:vertical}button{padding:7px 10px;margin:3px 3px 3px 0;border:0;border-radius:5px;color:white;background:#155c9e;cursor:pointer}button:disabled{opacity:.45;cursor:default}
     .secondary{background:#eef5fa;color:#183047}#fill{width:100%;font-weight:700}#status{white-space:pre-wrap;padding:9px;background:#eef5fa;border-radius:5px;overflow-wrap:anywhere}#status.error{color:#b42318;border:1px solid #e9a2a0;background:#fff0ef;font-weight:700}
     .hint{font-size:12px;color:#476078}#people label{display:flex;gap:7px;align-items:center}table{border-collapse:collapse;width:100%;margin:9px 0}td,th{border-bottom:1px solid #d1dce5;padding:5px;text-align:left;vertical-align:top}td.content{white-space:pre-wrap;overflow-wrap:anywhere;max-width:290px}td input{width:64px!important}details.settings{margin:10px 0;border:1px solid #d1dce5;border-radius:5px}
-  </style><details class="panel"><summary>📝 MMS工作日誌小助手 v${VERSION}</summary><div class="body">
+  </style><details class="panel"><summary>📝 MMS填報小助手 v${VERSION}</summary><div class="body">
     <label>工作日期<input id="date" type="date"></label>
     <section id="personArea"><strong>填寫人員</strong> <button id="readPeople" class="secondary" type="button">讀取人員</button><div id="people"></div></section>
     <label>填寫類型<select id="mode"><option value="field">灰系統專用</option><option value="office">通用</option><option value="morning">通用（上午請假）</option><option value="afternoon">通用（下午請假）</option><option value="leave">整天請假</option><option value="holiday">假日加班</option></select></label>
@@ -790,12 +791,13 @@
   $('addFavorite').onclick = () => {
     try { const name = officeInput(); const value = officeSettings({ schema: 1, favorites: [...office.favorites, name], last: name }); localStorage.setItem(OFFICE_KEY, JSON.stringify(value)); invariant(localStorage.getItem(OFFICE_KEY) === JSON.stringify(value), '常用項目保存失敗。'); office = value; displayOffice(name); status('已加入常用項目。'); } catch (error) { status(error.message, true); }
   };
-  $('loadLog').onclick = async event => {
+  async function loadWeeklyLog({ auto = false, shift = false } = {}) {
     if (busy) return;
     let source = null;
     try {
       try { source = weeklyLogSource(JSON.parse(localStorage.getItem(LOG_SOURCE_KEY) || 'null')); } catch { source = null; }
-      if (!source || event.shiftKey) {
+      if (auto && !source) return; // 自動帶入不跳對話框；尚未設定來源時略過。
+      if (!source || shift) {
         const url = window.prompt('貼上本週紀錄 Web App 網址（/exec 結尾）', source?.url || '');
         if (url === null) return;
         const key = window.prompt('貼上 MMS 讀取密鑰（Apps Script 執行 setupMmsWeeklyLogKey 取得）');
@@ -803,19 +805,27 @@
         source = weeklyLogSource({ url, key });
       }
       const date = $('date').value;
-      $('loadLog').disabled = true; status('讀取本週紀錄中…');
+      $('loadLog').disabled = true; status(auto ? '自動讀取今天本週紀錄中…' : '讀取本週紀錄中…');
       const result = await fetchWeeklyLog(source, date);
       localStorage.setItem(LOG_SOURCE_KEY, JSON.stringify(source)); // 讀取成功才保存網址與密鑰。
       const skippedNote = result.skipped ? `；${result.skipped} 筆缺機組或內容未帶入，請自行補上` : '';
-      if (!result.count) { status(`本週紀錄 ${date} 沒有可帶入的工項${skippedNote}。`, true); return; }
-      if (clean($('raw').value) && !window.confirm('文字框已有內容，要以本週紀錄取代嗎？')) { status('已取消，文字框未變更。'); return; }
+      if (!result.count) { status(`本週紀錄 ${date} 沒有可帶入的工項${skippedNote}。`, !auto); return; }
+      if (clean($('raw').value)) {
+        if (auto) return; // 自動帶入不覆蓋已有內容。
+        if (!window.confirm('文字框已有內容，要以本週紀錄取代嗎？')) { status('已取消，文字框未變更。'); return; }
+      }
       $('raw').value = result.text;
-      status(`已帶入 ${date} 本週紀錄 ${result.count} 筆${result.three ? `（含三部機 ${result.three} 筆）` : ''}${skippedNote}。\n同日重新產生的新舊版本都會列出，請核對、刪掉不需要的再按「填寫」。`);
+      status(`${auto ? '已自動帶入今天' : '已帶入 ' + date + ' '}本週紀錄 ${result.count} 筆${result.three ? `（含三部機 ${result.three} 筆）` : ''}${skippedNote}。
+同日重新產生的新舊版本都會列出，請核對、刪掉不需要的再按「填寫」。`);
     } catch (error) {
       if (error.code === 'BAD_KEY') { try { localStorage.removeItem(LOG_SOURCE_KEY); } catch { /* 保留錯誤訊息。 */ } }
-      status(error.message, true);
+      status(auto ? `自動帶入失敗，可手動按「從本週紀錄帶入」：${error.message}` : error.message, !auto ? true : false);
     } finally { $('loadLog').disabled = busy; }
-  };
+  }
+  $('loadLog').onclick = event => loadWeeklyLog({ shift: event.shiftKey });
+  function alreadyFilledToday() {
+    try { return JSON.parse(localStorage.getItem(FILLED_KEY) || 'null')?.date === today(); } catch { return false; }
+  }
   function status(message, error = false) { $('status').textContent = message; $('status').classList.toggle('error', error); }
   function department(doc = document) {
     const own = clean(doc.querySelector('form input#DEPT_CD')?.value);
@@ -1166,6 +1176,7 @@
     releaseSaveAlert();
     sessionStorage.removeItem(SAVE_DONE_KEY);
     sessionStorage.setItem(SAVE_RECEIPT_KEY, JSON.stringify({ created: Date.now() }));
+    if (options.mode === 'field' || draft.mode === 'field') { try { localStorage.setItem(FILLED_KEY, JSON.stringify({ date: draft.date })); } catch { /* 無法記錄時下次仍會自動帶入。 */ } }
     installSaveAlert();
     save.click();
   }
@@ -1222,6 +1233,10 @@
       else status('有未完成草稿，但目前頁面不符預期；請回原分頁或重新按「填寫」。', true);
     }
   } catch (error) { status(`跨頁草稿無法讀取：${error.message}`, true); }
+  // 上班日灰系統專用、今天尚未送出存檔：開頁自動帶入本週紀錄，只剩核對後按「填寫」。
+  try {
+    if (!initError && !saveSucceeded && !sessionStorage.getItem(DRAFT_KEY) && $('mode').value === 'field' && $('date').value === today() && weekday(today()) && !clean($('raw').value) && !alreadyFilledToday()) loadWeeklyLog({ auto: true });
+  } catch { /* 自動帶入失敗不影響手動操作。 */ }
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
   else start();
