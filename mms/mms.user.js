@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS填報小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.33
+// @version      0.1.34
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數、預定完成日、保養卡、轉簽選課長（不送出）及檢修經過帶入簽核意見，並自動確定其儲存成功提示。
 // @match        https://*/
 // @match        http://*/
@@ -21,7 +21,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.33';
+  const VERSION = '0.1.34';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -322,8 +322,15 @@
     const holidayText = clean(value.holidayText ?? '');
     const lastOvertimeText = clean(value.lastOvertimeText ?? '大修工作');
     invariant(Object.values(overtimeTexts).every(text => typeof text === 'string' && text.length <= 2000) && overtimeText.length <= 2000 && holidayText.length <= 2000 && lastOvertimeText && lastOvertimeText.length <= 2000, '加班內容最多 2000 字。');
+    // 每人各自的平日加班時數（0 = 不加班）；舊設定沒有此欄，缺的人沿用上方加班時數。
+    invariant(value.personOvertime === undefined || (value.personOvertime && typeof value.personOvertime === 'object' && !Array.isArray(value.personOvertime)), '個別加班時數設定格式不符。');
+    const personOvertime = {};
+    for (const [name, hours] of Object.entries(value.personOvertime ?? {})) {
+      invariant(clean(name) && name.length <= 80 && [0, 2, 3, 4].includes(Number(hours)), '個別加班時數須為不加班、2、3 或 4 小時。');
+      personOvertime[clean(name)] = Number(hours);
+    }
     // memory 僅保留作舊設定兼容；目前一律自動保存與載入。
-    return { schema: 1, memory: true, total: 8, people: value.people.map(clean), mode, leaveHours, morningLeaveHours, holidayHours, overtimeHours, lastOvertimeHours, overtimeText, overtimeTexts, holidayText, lastOvertimeText };
+    return { schema: 1, memory: true, total: 8, people: value.people.map(clean), mode, leaveHours, morningLeaveHours, holidayHours, overtimeHours, lastOvertimeHours, overtimeText, overtimeTexts, holidayText, lastOvertimeText, personOvertime };
   }
 
   function saveSettings(storage, value) {
@@ -374,12 +381,19 @@
   function workload(value, date, requested) {
     const config = settings(value);
     const fullLeave = config.mode === 'leave';
-    const overtime = weekday(date) && ['field', 'office', 'morning'].includes(config.mode) && !fullLeave ? config.overtimeHours : 0;
-    invariant(!overtime || config.overtimeText, '請輸入加班工作內容。');
+    const applicable = weekday(date) && ['field', 'office', 'morning'].includes(config.mode) && !fullLeave && config.overtimeHours > 0;
+    // overtime 是上方的預設加班時數；每人實際時數用 overtimeFor（個別設定優先，不加班 = 0）。
+    const overtime = applicable ? config.overtimeHours : 0;
+    const overtimeFor = name => applicable ? (config.personOvertime[clean(name)] ?? config.overtimeHours) : 0;
+    invariant(!config.people.some(name => overtimeFor(name) > 0) || config.overtimeText, '請輸入加班工作內容。');
     const base = config.mode === 'afternoon' ? 8 - config.leaveHours : config.mode === 'morning' ? 8 - config.morningLeaveHours : config.mode === 'holiday' ? config.holidayHours : 8;
-    const total = fullLeave ? 0 : base + overtime;
-    const period = config.mode === 'morning' ? `${config.morningLeaveHours === 4 ? '1230' : String(8 + config.morningLeaveHours).padStart(2, '0') + '00'}-${overtime ? dutyPeriod(8 + overtime).split('-')[1] : '1630'}` : dutyPeriod(total);
-    return { ...config, base, overtime, total, period, fullLeave, date: dateKey(date) };
+    const timing = name => {
+      const own = overtimeFor(name), total = fullLeave ? 0 : base + own;
+      const period = config.mode === 'morning' ? `${config.morningLeaveHours === 4 ? '1230' : String(8 + config.morningLeaveHours).padStart(2, '0') + '00'}-${own ? dutyPeriod(8 + own).split('-')[1] : '1630'}` : dutyPeriod(total);
+      return { overtime: own, total, period };
+    };
+    const { total, period } = timing('');
+    return { ...config, base, overtime, overtimeFor, timing, total, period, fullLeave, date: dateKey(date) };
   }
   function sharedPeople(existing, selected, employees) {
     const valid = existing.map(row => Number(row.seq));
@@ -402,6 +416,7 @@
   }
   function makeWorkPlan(existing, requested, options, scope) {
     const { base, overtime, total, fullLeave, mode } = options;
+    const ownOvertime = name => options.overtimeFor ? options.overtimeFor(name) : overtime;
     const selected = mode === 'field' ? sharedPeople(existing, scope.selected, scope.employees) : [...scope.selected];
     const linkedPeople = selected.filter(name => !scope.selected.includes(name));
     scope = { ...scope, selected };
@@ -418,13 +433,13 @@
       const csv = mergeCsv(person.csv, [], valid); return csv ? csv.split(',').map(Number) : [];
     }));
     // 用本人指派、已填工時差及上次加班內容辨識，不能假設加班永遠是最後一列。
-    const previousOvertime = new Set();
+    const previousOvertime = new Set(), previousByPerson = new Map();
     for (const person of assigned) {
       if (!['field', 'office', 'morning'].includes(mode) || person.previousHours > 12) continue;
       if (mode === 'morning' ? person.sequences.length < 2 : person.previousHours <= 8) continue;
       const matches = existing.filter(row => person.sequences.includes(Number(row.seq)) && !isTbm(row.context) && (mode === 'morning' ? [2, 3, 4].includes(Number(row.hour)) : Number(row.hour) === person.previousHours - 8) && [options.lastOvertimeText, options.overtimeText].some(text => text && canonical(row.context) === canonical(text)));
       invariant(matches.length <= 1, '本人加班工項無法唯一辨識，請先在網站核對。');
-      if (matches.length) previousOvertime.add(Number(matches[0].seq));
+      if (matches.length) { previousOvertime.add(Number(matches[0].seq)); previousByPerson.set(person.name, Number(matches[0].seq)); }
     }
     let plan;
     if (mode === 'field') {
@@ -451,24 +466,33 @@
       } else if (main.hour !== base) { changes.push({ seq: main.seq, before: main.hour, after: base }); main.hour = base; }
       plan = { rows, changes, assignments: [main.seq], personAssignments: assigned.map(person => ({ name: person.name, sequences: [main.seq], total: fullLeave ? 8 : total })) };
     }
-    if (overtime) {
-      const reusable = plan.rows.filter(row => !plan.personAssignments.some(person => person.sequences.includes(row.seq)) && common.some(old => Number(old.seq) === row.seq) && (previousOvertime.has(row.seq) || canonical(row.context) === canonical(options.overtimeText)) && Number(row.progress) === 100);
+    // 加班依時數分組：時數相同的人共用一列，不同時數各一列（例如本人 3 小時、同事 4 小時）；0 = 不加班。
+    const groups = new Map();
+    for (const person of plan.personAssignments) {
+      const hours = ownOvertime(person.name);
+      if (hours > 0) groups.set(hours, [...(groups.get(hours) || []), person]);
+    }
+    for (const [hours, members] of groups) {
+      const groupPrevious = new Set(members.map(person => previousByPerson.get(person.name)).filter(Boolean));
+      const oldOf = person => assigned.find(item => item.name === person.name)?.sequences || [];
+      const reusable = plan.rows.filter(row => !plan.personAssignments.some(person => person.sequences.includes(row.seq)) && Number(row.progress) === 100 && (groupPrevious.has(row.seq) || (canonical(row.context) === canonical(options.overtimeText) && members.filter(person => assigned.some(item => item.name === person.name)).every(person => oldOf(person).includes(row.seq)))));
       invariant(reusable.length <= 1, '本人有多個加班工項，請先在網站核對。');
       let extra = reusable[0];
-      if (!extra || (frozen.has(extra.seq) && (extra.hour !== overtime || clean(extra.context) !== options.overtimeText))) {
-        extra = { context: options.overtimeText, seq: Math.max(0, ...plan.rows.map(row => row.seq)) + 1, hour: overtime, progress: 100, added: true }; plan.rows.push(extra);
+      if (!extra || (frozen.has(extra.seq) && (extra.hour !== hours || clean(extra.context) !== options.overtimeText))) {
+        extra = { context: options.overtimeText, seq: Math.max(0, ...plan.rows.map(row => row.seq)) + 1, hour: hours, progress: 100, added: true }; plan.rows.push(extra);
       } else {
-        if (extra.hour !== overtime || clean(extra.context) !== options.overtimeText) plan.changes.push({ seq: extra.seq, before: extra.hour, after: overtime, context: options.overtimeText, beforeContext: extra.context });
-        extra.hour = overtime; extra.context = options.overtimeText;
+        if (extra.hour !== hours || clean(extra.context) !== options.overtimeText) plan.changes.push({ seq: extra.seq, before: extra.hour, after: hours, context: options.overtimeText, beforeContext: extra.context });
+        extra.hour = hours; extra.context = options.overtimeText;
       }
-      plan.personAssignments.forEach(person => { person.sequences = [...new Set([...person.sequences, extra.seq])].sort((a, b) => a - b); });
+      members.forEach(person => { person.sequences = [...new Set([...person.sequences, extra.seq])].sort((a, b) => a - b); });
       plan.assignments = [...new Set([...plan.assignments, extra.seq])];
     }
     invariant(plan.rows.every(row => row.seq <= 999), '工項序號超過網站上限。');
     plan.personAssignments.forEach(person => {
+      const expected = fullLeave ? 8 : base + ownOvertime(person.name);
       const ownTotal = plan.rows.filter(row => person.sequences.includes(row.seq)).reduce((sum, row) => sum + row.hour, 0);
-      invariant(ownTotal === (fullLeave ? 8 : total), '本人工項合計不符工作時數，請核對。');
-      person.total = fullLeave ? 8 : total;
+      invariant(ownTotal === expected, '本人工項合計不符工作時數，請核對。');
+      person.total = expected;
     });
     return { ...plan, linkedPeople, replaceAssignments: true, validSequences: plan.rows.map(row => row.seq), added: plan.rows.filter(row => row.added), total: plan.rows.reduce((sum, row) => sum + row.hour, 0) };
   }
@@ -733,7 +757,7 @@
     label{display:block;margin:9px 0}input,textarea,button,select{font:inherit;box-sizing:border-box}input[type=date],input[type=number],input[type=text],select,textarea{width:100%;padding:6px;border:1px solid #9fb6cb;border-radius:5px;background:white;color:#183047}[hidden]{display:none!important}
     textarea{min-height:120px;resize:vertical}button{padding:7px 10px;margin:3px 3px 3px 0;border:0;border-radius:5px;color:white;background:#155c9e;cursor:pointer}button:disabled{opacity:.45;cursor:default}
     .secondary{background:#eef5fa;color:#183047}#fill{width:100%;font-weight:700}#status{white-space:pre-wrap;padding:9px;background:#eef5fa;border-radius:5px;overflow-wrap:anywhere}#status.error{color:#b42318;border:1px solid #e9a2a0;background:#fff0ef;font-weight:700}
-    .hint{font-size:12px;color:#476078}#people label{display:flex;gap:7px;align-items:center}table{border-collapse:collapse;width:100%;margin:9px 0}td,th{border-bottom:1px solid #d1dce5;padding:5px;text-align:left;vertical-align:top}td.content{white-space:pre-wrap;overflow-wrap:anywhere;max-width:290px}td input{width:64px!important}details.settings{margin:10px 0;border:1px solid #d1dce5;border-radius:5px}
+    .hint{font-size:12px;color:#476078}#people label{display:flex;gap:7px;align-items:center}#people select{width:auto;margin-left:auto}table{border-collapse:collapse;width:100%;margin:9px 0}td,th{border-bottom:1px solid #d1dce5;padding:5px;text-align:left;vertical-align:top}td.content{white-space:pre-wrap;overflow-wrap:anywhere;max-width:290px}td input{width:64px!important}details.settings{margin:10px 0;border:1px solid #d1dce5;border-radius:5px}
   </style><details class="panel"><summary>📝 MMS填報小助手 v${VERSION}</summary><div class="body">
     <label>工作日期<input id="date" type="date"></label>
     <section id="personArea"><strong>填寫人員</strong> <button id="readPeople" class="secondary" type="button">讀取人員</button><div id="people"></div></section>
@@ -758,6 +782,7 @@
     $('holidayText').value = value.holidayText; $('overtimeEnabled').checked = restoreDraft && value.overtimeHours > 0;
     $('inspectionEnabled').checked = restoreDraft && value.inspectionEnabled === true;
     $('overtimeHours').value = value.lastOvertimeHours; $('overtimeText').value = value.overtimeText;
+    applyPersonOvertime(value.personOvertime);
   }
   displayParameters(configuration);
   function displayOffice(selected = office.last) {
@@ -782,6 +807,7 @@
     $('manualArea').hidden = Boolean($('officeItem').value);
     $('overtimeArea').hidden = !['field', 'office', 'morning'].includes(mode) || !clean($('date').value) || !weekday($('date').value);
     $('overtimeFields').hidden = !$('overtimeEnabled').checked;
+    showPersonOvertime();
   }
   displayOffice();
   displayMode();
@@ -1003,14 +1029,33 @@
     for (const name of values) {
       const label = document.createElement('label'), box = document.createElement('input');
       box.type = 'checkbox'; box.value = name; box.checked = names.includes(name); box.disabled = busy;
-      box.addEventListener('change', rememberPeople);
-      label.append(box, document.createTextNode(name)); $('people').appendChild(label);
+      box.addEventListener('change', () => { showPersonOvertime(); rememberPeople(); });
+      // 平日加班時，每位勾選人員各自選加班時數（不加班／2／3／4），依姓名記住。
+      const select = document.createElement('select'); select.className = 'ot'; select.dataset.name = name; select.disabled = busy;
+      for (const hours of [0, 2, 3, 4]) { const option = document.createElement('option'); option.value = String(hours); option.textContent = hours ? `加班 ${hours} 小時` : '不加班'; select.appendChild(option); }
+      select.value = String(configuration.personOvertime?.[name] ?? $('overtimeHours').value);
+      select.addEventListener('change', rememberPeople);
+      label.append(box, document.createTextNode(name), select); $('people').appendChild(label);
     }
+    showPersonOvertime();
+  }
+  function showPersonOvertime() {
+    const on = $('overtimeEnabled').checked && !$('overtimeArea').hidden;
+    for (const label of $('people').querySelectorAll('label')) label.querySelector('select.ot').hidden = !on || !label.querySelector('input').checked;
+  }
+  function personOvertimeValues() {
+    const result = {};
+    for (const select of $('people').querySelectorAll('select.ot')) result[select.dataset.name] = Number(select.value);
+    return result;
+  }
+  function applyPersonOvertime(map = {}) {
+    for (const select of $('people').querySelectorAll('select.ot')) select.value = String(map[select.dataset.name] ?? $('overtimeHours').value);
+    showPersonOvertime();
   }
   displayPeople();
   function selectedPeople() { return [...$('people').querySelectorAll('input:checked')].map(box => box.value); }
   function currentSettings() {
-    return settings({ schema: 1, memory: true, total: 8, people: selectedPeople(), mode: $('mode').value, leaveHours: Number($('leaveHours').value), morningLeaveHours: Number($('morningLeaveHours').value), holidayHours: Number($('holidayHours').value), holidayText: $('holidayText').value, overtimeHours: $('overtimeEnabled').checked ? Number($('overtimeHours').value) : 0, lastOvertimeHours: Number($('overtimeHours').value), overtimeText: $('overtimeText').value, overtimeTexts: configuration.overtimeTexts, lastOvertimeText: configuration.lastOvertimeText });
+    return settings({ schema: 1, memory: true, total: 8, people: selectedPeople(), mode: $('mode').value, leaveHours: Number($('leaveHours').value), morningLeaveHours: Number($('morningLeaveHours').value), holidayHours: Number($('holidayHours').value), holidayText: $('holidayText').value, overtimeHours: $('overtimeEnabled').checked ? Number($('overtimeHours').value) : 0, lastOvertimeHours: Number($('overtimeHours').value), personOvertime: { ...configuration.personOvertime, ...personOvertimeValues() }, overtimeText: $('overtimeText').value, overtimeTexts: configuration.overtimeTexts, lastOvertimeText: configuration.lastOvertimeText });
   }
   function parameters() {
     const value = currentSettings();
@@ -1063,7 +1108,7 @@
     const plan = makeWorkPlan(before, draft.requested, options, { selected: draft.people, employees: existingStaff });
     if (plan.linkedPeople.length) {
       const names = plan.personAssignments.map(person => person.name);
-      if (!window.confirm(`這些工項與其他人共用，將一起補項及重分配時數。\n本次處理：${names.join('、')}\n包含原本未勾選：${plan.linkedPeople.join('、')}\n工作總時數將一起填為 ${options.total} 小時。\n確認後才修改，核對完成會自動存檔。`)) {
+      if (!window.confirm(`這些工項與其他人共用，將一起補項及重分配時數。\n本次處理：${names.join('、')}\n包含原本未勾選：${plan.linkedPeople.join('、')}\n工作總時數：${names.map(name => `${name} ${options.timing(name).total} 小時`).join('、')}。\n確認後才修改，核對完成會自動存檔。`)) {
         sessionStorage.removeItem(DRAFT_KEY); status('已取消共用人員修正，表單未修改。'); return;
       }
     }
@@ -1145,7 +1190,8 @@
         target = readEmployees().find(person => person.name === name);
       }
       nativeValue(target.fields.csv, mergeCsv(plan.replaceAssignments ? '' : target.fields.csv.value, assignedTo(name), plan.validSequences));
-      nativeValue(target.fields.period, options.period); nativeValue(target.fields.hours, options.total);
+      const own = options.timing(name);
+      nativeValue(target.fields.period, own.period); nativeValue(target.fields.hours, own.total);
     }
     invariant(dateKey(workDate.value) === draft.date && Math.abs(currentItems().reduce((sum, item) => sum + Number(item.hour), 0) - plan.total) < 1e-9, '最後日期或時數總和不符，請核對。');
     for (const item of plan.added) invariant(Number(readItems().find(row => Number(row.seq) === item.seq)?.progress) === 100, '新工項進度讀回不為 100%。');
@@ -1155,9 +1201,9 @@
       {
         const sequences = person.fields.csv.value.split(',').map(Number);
         const ownTotal = currentItems().filter(row => sequences.includes(Number(row.seq))).reduce((sum, row) => sum + Number(row.hour), 0);
-        invariant(Math.abs(ownTotal - (options.fullLeave ? 8 : options.total)) < 1e-9, '最後本人工項時數不符目標，請核對。');
+        invariant(Math.abs(ownTotal - (options.fullLeave ? 8 : options.timing(name).total)) < 1e-9, '最後本人工項時數不符目標，請核對。');
       }
-      invariant(person.fields.period.value === options.period && person.fields.hours.value === String(options.total), '人員工作時間或總時數核對失敗。');
+      invariant(person.fields.period.value === options.timing(name).period && person.fields.hours.value === String(options.timing(name).total), '人員工作時間或總時數核對失敗。');
     }
     for (const original of JSON.parse(beforeStaff).filter(person => person[0] && !draft.people.includes(person[0]))) {
       invariant(staffSnapshot().some(person => JSON.stringify(person) === JSON.stringify(original)), '其他人員資料在填寫時改變，請核對。');
@@ -1172,7 +1218,9 @@
     invariant(form.reportValidity(), '網站表單仍有未通過驗證的欄位，未送出存檔。');
     checkActive();
     sessionStorage.removeItem(DRAFT_KEY);
-    status(`已填寫並核對 ${draft.date}，每人 ${options.total} 小時，工作時間 ${options.period}；正在送出存檔，成功請以網站提示為準。`);
+    const same = new Set(draft.people.map(name => `${options.timing(name).total}|${options.timing(name).period}`)).size === 1;
+    const summary = same ? `每人 ${options.timing(draft.people[0]).total} 小時，工作時間 ${options.timing(draft.people[0]).period}` : draft.people.map(name => `${name} ${options.timing(name).total} 小時（${options.timing(name).period}）`).join('、');
+    status(`已填寫並核對 ${draft.date}，${summary}；正在送出存檔，成功請以網站提示為準。`);
     releaseSaveAlert();
     sessionStorage.removeItem(SAVE_DONE_KEY);
     sessionStorage.setItem(SAVE_RECEIPT_KEY, JSON.stringify({ created: Date.now() }));
@@ -1209,7 +1257,11 @@
     status('已讀取目前部門人員，請勾選填寫對象。');
   });
   $('date').onchange = displayMode;
-  for (const id of ['leaveHours', 'morningLeaveHours', 'holidayHours', 'holidayText', 'overtimeEnabled', 'overtimeHours', 'overtimeText']) $(id).onchange = () => { displayMode(); rememberPeople(); };
+  for (const id of ['leaveHours', 'morningLeaveHours', 'holidayHours', 'holidayText', 'overtimeEnabled', 'overtimeHours', 'overtimeText']) $(id).onchange = () => {
+    // 上方加班時數是預設值：改它時，所有人員的個別時數一起套用。
+    if (id === 'overtimeHours') for (const select of $('people').querySelectorAll('select.ot')) select.value = $('overtimeHours').value;
+    displayMode(); rememberPeople();
+  };
   console.info(`[MMS小助手 v${VERSION}] 介面已建立。`);
   function finishSave() {
     status('儲存成功！'); ui.querySelector('details.panel').open = false;
