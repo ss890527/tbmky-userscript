@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MMS填報小助手
 // @namespace    moonbase.mms.worklog
-// @version      0.1.34
+// @version      0.1.35
 // @description  整理 LINE 工項、記住填寫人員、核對日期及欄位後自動存檔；請修單預填人數、時數、預定完成日、保養卡、轉簽選課長（不送出）及檢修經過帶入簽核意見，並自動確定其儲存成功提示。
 // @match        https://*/
 // @match        http://*/
@@ -21,7 +21,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '0.1.34';
+  const VERSION = '0.1.35';
   const TBM = 'TBM-KY工具箱會議';
   const SETTINGS_KEY = 'moonbase.mms.worklog.settings.v1';
   const OFFICE_KEY = 'moonbase.mms.worklog.office.v1';
@@ -312,7 +312,7 @@
     const lastOvertimeHours = Number(value.lastOvertimeHours ?? (overtimeHours || 2));
     invariant(Number.isInteger(leaveHours) && leaveHours >= 1 && leaveHours <= 4, '下午請假時數須為 1～4 小時。');
     invariant(Number.isInteger(morningLeaveHours) && morningLeaveHours >= 1 && morningLeaveHours <= 4, '上午請假時數須為 1～4 小時。');
-    invariant(Number.isInteger(holidayHours) && holidayHours >= 8 && holidayHours <= 12, '假日加班時數須為 8～12 小時。');
+    invariant(Number.isInteger(holidayHours) && holidayHours >= 1 && holidayHours <= 12, '假日加班時數須為 1～12 小時。');
     invariant([0, 2, 3, 4].includes(overtimeHours), '平日加班請選 2、3 或 4 小時。');
     invariant([2, 3, 4].includes(lastOvertimeHours), '平日加班請選 2、3 或 4 小時。');
     const overtimeTexts = { field: '大修工作', office: '', morning: '', ...value.overtimeTexts };
@@ -329,8 +329,19 @@
       invariant(clean(name) && name.length <= 80 && [0, 2, 3, 4].includes(Number(hours)), '個別加班時數須為不加班、2、3 或 4 小時。');
       personOvertime[clean(name)] = Number(hours);
     }
+    // 每人各自的假日加班時數（1～12）；缺的人沿用上方假日加班時數。
+    invariant(value.personHoliday === undefined || (value.personHoliday && typeof value.personHoliday === 'object' && !Array.isArray(value.personHoliday)), '個別假日時數設定格式不符。');
+    const personHoliday = {};
+    for (const [name, hours] of Object.entries(value.personHoliday ?? {})) {
+      invariant(clean(name) && name.length <= 80 && Number.isInteger(Number(hours)) && Number(hours) >= 1 && Number(hours) <= 12, '個別假日時數須為 1～12 小時。');
+      personHoliday[clean(name)] = Number(hours);
+    }
+    // 假日加班常用內容：使用者按「加入常用內容」才保存，手輸不自動加入。
+    invariant(value.holidayFavorites === undefined || Array.isArray(value.holidayFavorites), '假日常用內容設定格式不符。');
+    const holidayFavorites = [...new Set((value.holidayFavorites ?? []).map(text => clean(String(text))))];
+    invariant(holidayFavorites.length <= 30 && holidayFavorites.every(text => text && text.length <= 2000), '假日常用內容最多 30 筆、每筆 1～2000 字。');
     // memory 僅保留作舊設定兼容；目前一律自動保存與載入。
-    return { schema: 1, memory: true, total: 8, people: value.people.map(clean), mode, leaveHours, morningLeaveHours, holidayHours, overtimeHours, lastOvertimeHours, overtimeText, overtimeTexts, holidayText, lastOvertimeText, personOvertime };
+    return { schema: 1, memory: true, total: 8, people: value.people.map(clean), mode, leaveHours, morningLeaveHours, holidayHours, overtimeHours, lastOvertimeHours, overtimeText, overtimeTexts, holidayText, lastOvertimeText, personOvertime, personHoliday, holidayFavorites };
   }
 
   function saveSettings(storage, value) {
@@ -387,13 +398,15 @@
     const overtimeFor = name => applicable ? (config.personOvertime[clean(name)] ?? config.overtimeHours) : 0;
     invariant(!config.people.some(name => overtimeFor(name) > 0) || config.overtimeText, '請輸入加班工作內容。');
     const base = config.mode === 'afternoon' ? 8 - config.leaveHours : config.mode === 'morning' ? 8 - config.morningLeaveHours : config.mode === 'holiday' ? config.holidayHours : 8;
+    // 假日加班每人可各自時數（個別設定優先）；其他類型每人本業相同。
+    const baseFor = name => config.mode === 'holiday' ? (config.personHoliday[clean(name)] ?? config.holidayHours) : base;
     const timing = name => {
-      const own = overtimeFor(name), total = fullLeave ? 0 : base + own;
+      const own = overtimeFor(name), total = fullLeave ? 0 : baseFor(name) + own;
       const period = config.mode === 'morning' ? `${config.morningLeaveHours === 4 ? '1230' : String(8 + config.morningLeaveHours).padStart(2, '0') + '00'}-${own ? dutyPeriod(8 + own).split('-')[1] : '1630'}` : dutyPeriod(total);
       return { overtime: own, total, period };
     };
     const { total, period } = timing('');
-    return { ...config, base, overtime, overtimeFor, timing, total, period, fullLeave, date: dateKey(date) };
+    return { ...config, base, baseFor, overtime, overtimeFor, timing, total, period, fullLeave, date: dateKey(date) };
   }
   function sharedPeople(existing, selected, employees) {
     const valid = existing.map(row => Number(row.seq));
@@ -417,6 +430,7 @@
   function makeWorkPlan(existing, requested, options, scope) {
     const { base, overtime, total, fullLeave, mode } = options;
     const ownOvertime = name => options.overtimeFor ? options.overtimeFor(name) : overtime;
+    const baseOf = name => options.baseFor ? options.baseFor(name) : base;
     const selected = mode === 'field' ? sharedPeople(existing, scope.selected, scope.employees) : [...scope.selected];
     const linkedPeople = selected.filter(name => !scope.selected.includes(name));
     scope = { ...scope, selected };
@@ -428,7 +442,6 @@
       const csv = mergeCsv(people[0]?.csv || '', [], valid);
       return { name, sequences: csv ? csv.split(',').map(Number) : [], previousHours: Number(people[0]?.hours ?? people[0]?.fields?.hours.value ?? 8) };
     });
-    const common = existing.filter(row => assigned.every(person => person.sequences.includes(Number(row.seq))));
     const frozen = new Set(scope.employees.filter(person => person.name && !scope.selected.includes(person.name)).flatMap(person => {
       const csv = mergeCsv(person.csv, [], valid); return csv ? csv.split(',').map(Number) : [];
     }));
@@ -453,18 +466,31 @@
       invariant(requested.length === 1 && clean(requested[0]) && !isTbm(requested[0]), '本次工作請填一項內容。');
       const rows = existing.map(row => ({ ...row, seq: Number(row.seq), hour: Number(row.hour), added: false }));
       invariant(rows.every(row => clean(row.context) && Number.isInteger(row.seq) && row.seq > 0 && row.seq <= 999 && Number.isFinite(row.hour) && row.hour >= 0) && new Set(valid).size === rows.length, '既有工項序號或時數格式有誤。');
-      const matches = common.filter(row => !previousOvertime.has(Number(row.seq)) && canonical(row.context) === canonical(requested[0]));
-      invariant(matches.length <= 1, '本人有多個相同工項，請先在網站核對。');
-      let main = matches[0] && rows.find(row => row.seq === Number(matches[0].seq));
-      // 請假類型本人沒有可用列時，沿用同內容、同時數、100% 的最小序號，不改原列。
-      if (['morning', 'afternoon', 'leave'].includes(mode) && (!main || (frozen.has(main.seq) && main.hour !== base))) {
-        main = rows.filter(row => !previousOvertime.has(row.seq) && canonical(row.context) === canonical(requested[0]) && row.hour === base && Number(row.progress) === 100).sort((a, b) => a.seq - b.seq)[0] || main;
+      // 依每人本業時數分組（假日加班可本人 4、同事 8）：同時數共用一列，不同時數各一列同內容。
+      const groups = new Map();
+      for (const person of assigned) { const hours = baseOf(person.name); groups.set(hours, [...(groups.get(hours) || []), person]); }
+      const claimed = new Set(), changes = [], mainOf = new Map();
+      const matchFor = members => {
+        const matches = existing.filter(row => members.every(person => person.sequences.includes(Number(row.seq))) && !previousOvertime.has(Number(row.seq)) && !claimed.has(Number(row.seq)) && canonical(row.context) === canonical(requested[0]));
+        invariant(matches.length <= 1, '本人有多個相同工項，請先在網站核對。');
+        return matches[0] && rows.find(row => row.seq === Number(matches[0].seq));
+      };
+      const claim = (members, row) => { claimed.add(row.seq); members.forEach(person => mainOf.set(person.name, row.seq)); };
+      // 先讓時數已相符的組沿用原列，避免把別組的列改時數。
+      for (const [hours, members] of groups) { const row = matchFor(members); if (row && row.hour === hours) claim(members, row); }
+      for (const [hours, members] of groups) {
+        if (members.every(person => mainOf.has(person.name))) continue;
+        let main = matchFor(members);
+        // 請假類型本人沒有可用列時，沿用同內容、同時數、100% 的最小序號，不改原列。
+        if (['morning', 'afternoon', 'leave'].includes(mode) && (!main || (frozen.has(main.seq) && main.hour !== hours))) {
+          main = rows.filter(row => !previousOvertime.has(row.seq) && !claimed.has(row.seq) && canonical(row.context) === canonical(requested[0]) && row.hour === hours && Number(row.progress) === 100).sort((a, b) => a.seq - b.seq)[0] || main;
+        }
+        if (!main || (frozen.has(main.seq) && main.hour !== hours)) {
+          main = { context: clean(requested[0]), seq: Math.max(0, ...rows.map(row => row.seq)) + 1, hour: hours, progress: 100, added: true }; rows.push(main);
+        } else if (main.hour !== hours) { changes.push({ seq: main.seq, before: main.hour, after: hours }); main.hour = hours; }
+        claim(members, main);
       }
-      const changes = [];
-      if (!main || (frozen.has(main.seq) && main.hour !== base)) {
-        main = { context: clean(requested[0]), seq: Math.max(0, ...valid) + 1, hour: base, progress: 100, added: true }; rows.push(main);
-      } else if (main.hour !== base) { changes.push({ seq: main.seq, before: main.hour, after: base }); main.hour = base; }
-      plan = { rows, changes, assignments: [main.seq], personAssignments: assigned.map(person => ({ name: person.name, sequences: [main.seq], total: fullLeave ? 8 : total })) };
+      plan = { rows, changes, assignments: [...new Set(assigned.map(person => mainOf.get(person.name)))], personAssignments: assigned.map(person => ({ name: person.name, sequences: [mainOf.get(person.name)], total: fullLeave ? 8 : baseOf(person.name) + ownOvertime(person.name) })) };
     }
     // 加班依時數分組：時數相同的人共用一列，不同時數各一列（例如本人 3 小時、同事 4 小時）；0 = 不加班。
     const groups = new Map();
@@ -489,7 +515,7 @@
     }
     invariant(plan.rows.every(row => row.seq <= 999), '工項序號超過網站上限。');
     plan.personAssignments.forEach(person => {
-      const expected = fullLeave ? 8 : base + ownOvertime(person.name);
+      const expected = fullLeave ? 8 : baseOf(person.name) + ownOvertime(person.name);
       const ownTotal = plan.rows.filter(row => person.sequences.includes(row.seq)).reduce((sum, row) => sum + row.hour, 0);
       invariant(ownTotal === expected, '本人工項合計不符工作時數，請核對。');
       person.total = expected;
@@ -766,7 +792,7 @@
     <label id="morningLeaveArea" hidden>上午請假時數<select id="morningLeaveHours">${Array.from({ length: 4 }, (_, i) => `<option value="${i + 1}">${i + 1} 小時</option>`).join('')}</select></label>
     <div id="fieldArea"><label>貼上 LINE 工項<textarea id="raw" placeholder="直接貼整段 LINE 訊息，或按下方從本週紀錄帶入"></textarea></label><button id="loadLog" class="secondary" type="button">從本週紀錄帶入</button></div>
     <div id="officeArea" hidden><label>本次工作項目<select id="officeItem"></select></label><div id="manualArea" hidden><label>本次工作項目<input id="officeText" type="text" maxlength="200" placeholder="手動輸入工作內容"></label><button id="addFavorite" class="secondary" type="button">加入常用項目</button></div></div>
-    <div id="holidayArea" hidden><label>加班時數<select id="holidayHours">${Array.from({ length: 5 }, (_, i) => `<option value="${i + 8}">${i + 8} 小時</option>`).join('')}</select></label><label>工作內容與經過<textarea id="holidayText" maxlength="2000" placeholder="輸入本次假日加班工作內容"></textarea></label></div>
+    <div id="holidayArea" hidden><label>加班時數<select id="holidayHours">${Array.from({ length: 12 }, (_, i) => `<option value="${i + 1}">${i + 1} 小時</option>`).join('')}</select></label><label>常用內容<select id="holidayFavorite"></select></label><label>工作內容與經過<textarea id="holidayText" maxlength="2000" placeholder="輸入本次假日加班工作內容"></textarea></label><button id="holidayFavoriteToggle" class="secondary" type="button">加入常用內容</button></div>
     <label id="inspectionArea"><input id="inspectionEnabled" type="checkbox"> 現場巡檢</label>
     <section id="overtimeArea"><label><input id="overtimeEnabled" type="checkbox"> 平日加班</label><div id="overtimeFields" hidden><label>加班時數<select id="overtimeHours"><option value="2">2 小時</option><option value="3">3 小時</option><option value="4">4 小時</option></select></label><label>加班工作內容<textarea id="overtimeText" maxlength="2000"></textarea></label></div></section>
     <button id="fill" type="button">填寫</button>
@@ -783,6 +809,8 @@
     $('inspectionEnabled').checked = restoreDraft && value.inspectionEnabled === true;
     $('overtimeHours').value = value.lastOvertimeHours; $('overtimeText').value = value.overtimeText;
     applyPersonOvertime(value.personOvertime);
+    applyPersonHoliday(value.personHoliday);
+    displayHolidayFavorites();
   }
   displayParameters(configuration);
   function displayOffice(selected = office.last) {
@@ -1035,13 +1063,43 @@
       for (const hours of [0, 2, 3, 4]) { const option = document.createElement('option'); option.value = String(hours); option.textContent = hours ? `加班 ${hours} 小時` : '不加班'; select.appendChild(option); }
       select.value = String(configuration.personOvertime?.[name] ?? $('overtimeHours').value);
       select.addEventListener('change', rememberPeople);
-      label.append(box, document.createTextNode(name), select); $('people').appendChild(label);
+      // 假日加班時，每位勾選人員各自選時數（1～12），依姓名記住。
+      const holiday = document.createElement('select'); holiday.className = 'hd'; holiday.dataset.name = name; holiday.disabled = busy;
+      for (let hours = 1; hours <= 12; hours++) { const option = document.createElement('option'); option.value = String(hours); option.textContent = `${hours} 小時`; holiday.appendChild(option); }
+      holiday.value = String(configuration.personHoliday?.[name] ?? $('holidayHours').value);
+      holiday.addEventListener('change', rememberPeople);
+      label.append(box, document.createTextNode(name), select, holiday); $('people').appendChild(label);
     }
     showPersonOvertime();
   }
   function showPersonOvertime() {
-    const on = $('overtimeEnabled').checked && !$('overtimeArea').hidden;
-    for (const label of $('people').querySelectorAll('label')) label.querySelector('select.ot').hidden = !on || !label.querySelector('input').checked;
+    const on = $('overtimeEnabled').checked && !$('overtimeArea').hidden, holidayOn = $('mode').value === 'holiday';
+    for (const label of $('people').querySelectorAll('label')) {
+      const checked = label.querySelector('input').checked;
+      label.querySelector('select.ot').hidden = !on || !checked;
+      label.querySelector('select.hd').hidden = !holidayOn || !checked;
+    }
+  }
+  function personHolidayValues() {
+    const result = {};
+    for (const select of $('people').querySelectorAll('select.hd')) result[select.dataset.name] = Number(select.value);
+    return result;
+  }
+  function applyPersonHoliday(map = {}) {
+    for (const select of $('people').querySelectorAll('select.hd')) select.value = String(map[select.dataset.name] ?? $('holidayHours').value);
+    showPersonOvertime();
+  }
+  // 常用內容選單跟著文字框：文字等於某筆常用就選它，按鈕切成「移除」；否則「加入」。
+  function displayHolidayFavorites() {
+    const favorites = configuration.holidayFavorites || [], text = clean($('holidayText').value);
+    const manual = document.createElement('option'); manual.value = ''; manual.textContent = favorites.length ? '手動輸入' : '（尚無常用內容）';
+    $('holidayFavorite').replaceChildren(manual, ...favorites.map((item, index) => {
+      const option = document.createElement('option'), label = item.replace(/\s*\n\s*/g, '／');
+      option.value = String(index); option.textContent = label.length > 40 ? `${label.slice(0, 40)}…` : label; return option;
+    }));
+    const index = favorites.indexOf(text);
+    $('holidayFavorite').value = index >= 0 ? String(index) : '';
+    $('holidayFavoriteToggle').textContent = index >= 0 ? '移除此常用內容' : '加入常用內容';
   }
   function personOvertimeValues() {
     const result = {};
@@ -1055,7 +1113,7 @@
   displayPeople();
   function selectedPeople() { return [...$('people').querySelectorAll('input:checked')].map(box => box.value); }
   function currentSettings() {
-    return settings({ schema: 1, memory: true, total: 8, people: selectedPeople(), mode: $('mode').value, leaveHours: Number($('leaveHours').value), morningLeaveHours: Number($('morningLeaveHours').value), holidayHours: Number($('holidayHours').value), holidayText: $('holidayText').value, overtimeHours: $('overtimeEnabled').checked ? Number($('overtimeHours').value) : 0, lastOvertimeHours: Number($('overtimeHours').value), personOvertime: { ...configuration.personOvertime, ...personOvertimeValues() }, overtimeText: $('overtimeText').value, overtimeTexts: configuration.overtimeTexts, lastOvertimeText: configuration.lastOvertimeText });
+    return settings({ schema: 1, memory: true, total: 8, people: selectedPeople(), mode: $('mode').value, leaveHours: Number($('leaveHours').value), morningLeaveHours: Number($('morningLeaveHours').value), holidayHours: Number($('holidayHours').value), holidayText: $('holidayText').value, overtimeHours: $('overtimeEnabled').checked ? Number($('overtimeHours').value) : 0, lastOvertimeHours: Number($('overtimeHours').value), personOvertime: { ...configuration.personOvertime, ...personOvertimeValues() }, personHoliday: { ...configuration.personHoliday, ...personHolidayValues() }, holidayFavorites: configuration.holidayFavorites, overtimeText: $('overtimeText').value, overtimeTexts: configuration.overtimeTexts, lastOvertimeText: configuration.lastOvertimeText });
   }
   function parameters() {
     const value = currentSettings();
@@ -1260,7 +1318,26 @@
   for (const id of ['leaveHours', 'morningLeaveHours', 'holidayHours', 'holidayText', 'overtimeEnabled', 'overtimeHours', 'overtimeText']) $(id).onchange = () => {
     // 上方加班時數是預設值：改它時，所有人員的個別時數一起套用。
     if (id === 'overtimeHours') for (const select of $('people').querySelectorAll('select.ot')) select.value = $('overtimeHours').value;
+    // 假日加班時數同理：改上方預設，所有人員一起套用。
+    if (id === 'holidayHours') for (const select of $('people').querySelectorAll('select.hd')) select.value = $('holidayHours').value;
+    if (id === 'holidayText') displayHolidayFavorites();
     displayMode(); rememberPeople();
+  };
+  $('holidayText').addEventListener('input', displayHolidayFavorites);
+  $('holidayFavorite').onchange = () => {
+    const text = (configuration.holidayFavorites || [])[Number($('holidayFavorite').value)];
+    if ($('holidayFavorite').value !== '' && text) $('holidayText').value = text;
+    displayHolidayFavorites(); rememberPeople();
+  };
+  $('holidayFavoriteToggle').onclick = () => {
+    try {
+      const text = clean($('holidayText').value), favorites = configuration.holidayFavorites || [];
+      const removing = favorites.includes(text);
+      invariant(removing || text, '請先輸入工作內容，再加入常用。');
+      configuration = saveSettings(localStorage, { ...currentSettings(), holidayFavorites: removing ? favorites.filter(item => item !== text) : [...favorites, text] });
+      displayHolidayFavorites();
+      status(removing ? '已移除此常用內容。' : '已加入常用內容。');
+    } catch (error) { status(error.message, true); }
   };
   console.info(`[MMS小助手 v${VERSION}] 介面已建立。`);
   function finishSave() {
